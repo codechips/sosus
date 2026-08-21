@@ -1,0 +1,57 @@
+# macOS
+.DS_Store
+
+# Rust build output
+/target/
+
+# Local configuration and environment
+.env
+.env.*
+!.env.example
+/config.local.toml
+
+# Signing and notarization credentials
+*.p12
+*.p8
+*.key
+*.pem
+*.cer
+*.crt
+*.mobileprovision
+*.provisionprofile
+
+# Local sosus state and sensitive data
+/.sosus/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+
+# Recordings and downloaded model weights
+*.wav
+*.aac
+*.aif
+*.aiff
+*.caf
+*.m4a
+*.mp3
+*.mp4
+*.m4v
+*.mov
+*.flac
+*.ogg
+*.opus
+*.webm
+*.gguf
+*.onnx
+*.safetensors
+/models/
+
+# Safe fixtures matching these patterns require deliberate `git add -f` after
+# their provenance and redistribution rights have been reviewed.
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads-credential-key
+.beads/proxieddb/

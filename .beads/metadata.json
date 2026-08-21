@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "sosus",
+  "project_id": "8001ef91-4f79-423f-9eb1-4e90a18d6c28"
+}
