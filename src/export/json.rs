@@ -1,0 +1,1 @@
+//! Machine-readable transcript rendering.

@@ -1,0 +1,1 @@
+//! Transcript reader pane.

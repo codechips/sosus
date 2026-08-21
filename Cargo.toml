@@ -1,0 +1,32 @@
+[package]
+name = "sosus"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Local-first meeting intelligence for macOS"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+etcetera = "0.11"
+libc = "0.2"
+num_cpus = "1"
+ratatui = { version = "0.30.1", features = ["crossterm_0_29"] }
+rusqlite = { version = "0.32.1", features = ["bundled", "functions"] }
+serde = { version = "1", features = ["derive"] }
+serde_ignored = "0.1"
+serde_json = "1"
+sha2 = "0.10"
+sqlite-vec = "0.1.9"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "local-offset", "parsing", "serde"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "1.1.4"
+toml_edit = "0.25.13"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[profile.release]
+strip = true
