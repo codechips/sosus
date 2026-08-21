@@ -1,2 +1,22 @@
 [tools]
 rust = "1.88.0"
+
+[tasks.dev]
+description = "Run the interactive terminal UI"
+run = "cargo run -- tui"
+
+[tasks.check]
+description = "Compile the application"
+run = "cargo check"
+
+[tasks.test]
+description = "Run the test suite"
+run = "cargo test"
+
+[tasks.lint]
+description = "Run Clippy with warnings denied"
+run = "cargo clippy --all-targets -- -D warnings"
+
+[tasks.format]
+description = "Format Rust source"
+run = "cargo fmt"

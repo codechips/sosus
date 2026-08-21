@@ -7,10 +7,12 @@ mod diarize;
 mod export;
 mod index;
 mod llm;
+mod logging;
 mod paths;
 mod pipeline;
 mod tui;
 
-fn main() -> anyhow::Result<()> {
-    Ok(())
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    cli::run().await
 }
