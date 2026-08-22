@@ -161,13 +161,7 @@ impl App {
             self.selected_meeting = self
                 .selected_meeting
                 .min(self.meetings.len().saturating_sub(1));
-            if let Some(meeting) = self.meetings.get(self.selected_meeting) {
-                self.transcript = meeting.transcript.clone();
-                self.transcript_scroll = 0;
-            } else {
-                self.transcript.clear();
-                self.transcript_scroll = 0;
-            }
+            self.load_selected_transcript();
         }
     }
 
@@ -189,7 +183,22 @@ impl App {
             return;
         };
         self.selected_meeting = selected;
-        self.transcript = meeting.transcript.clone();
+        let _ = meeting;
+        self.load_selected_transcript();
+    }
+
+    fn load_selected_transcript(&mut self) {
+        self.transcript = self
+            .meetings
+            .get(self.selected_meeting)
+            .map(|meeting| {
+                if meeting.transcript.is_empty() {
+                    archive::load_transcript(meeting).unwrap_or_default()
+                } else {
+                    meeting.transcript.clone()
+                }
+            })
+            .unwrap_or_default();
         self.transcript_scroll = 0;
     }
 

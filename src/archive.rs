@@ -38,19 +38,23 @@ fn load_meeting(path: PathBuf) -> io::Result<Meeting> {
         .and_then(|value| value.to_str())
         .unwrap_or("meeting")
         .to_owned();
-    let transcript = path.join("transcript.md");
     let recording = path.join("recording.wav");
-    let segments = if transcript.is_file() {
-        parse_transcript(&fs::read_to_string(transcript)?)?
-    } else {
-        Vec::new()
-    };
     Ok(Meeting {
         path,
         name,
         duration_seconds: recording_duration_seconds(&recording),
-        transcript: segments,
+        // Discovery drives the sidebar. Transcript parsing is deferred until this
+        // meeting is selected, so a large archive does not block each refresh.
+        transcript: Vec::new(),
     })
+}
+
+pub fn load_transcript(meeting: &Meeting) -> io::Result<Vec<Segment>> {
+    let path = meeting.path.join("transcript.md");
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    parse_transcript(&fs::read_to_string(path)?)
 }
 
 fn recording_duration_seconds(path: &Path) -> Option<f64> {
@@ -159,5 +163,39 @@ mod tests {
         assert_eq!(segments[0].end_s, 2.5);
         assert_eq!(segments[0].speaker.as_deref(), Some("Speaker 1"));
         assert_eq!(segments[0].text, "Hello there");
+    }
+
+    #[test]
+    fn discovery_defers_transcript_parsing_until_selection() {
+        let root = env::temp_dir().join(format!(
+            "sosus-archive-lazy-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let meeting = root.join("meeting");
+        fs::create_dir(&meeting).unwrap();
+        hound::WavWriter::create(
+            meeting.join("recording.wav"),
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap()
+        .finalize()
+        .unwrap();
+        fs::write(
+            meeting.join("transcript.md"),
+            "## [00:00:00.000 - 00:00:01.000] Unknown speaker\n\nHello\n",
+        )
+        .unwrap();
+
+        let meetings = discover(&root).unwrap();
+        assert!(meetings[0].transcript.is_empty());
+        assert_eq!(load_transcript(&meetings[0]).unwrap()[0].text, "Hello");
+        fs::remove_dir_all(root).unwrap();
     }
 }
