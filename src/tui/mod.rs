@@ -30,6 +30,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
+    style::Modifier,
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
@@ -366,7 +367,13 @@ impl App {
             render_too_small(frame, area);
             return;
         }
-        let content_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+        let content_area = Rect::new(
+            area.x,
+            area.y.saturating_add(1),
+            area.width,
+            area.height.saturating_sub(2),
+        );
+        render_header_bar(frame, area);
 
         let (columns, recording_area) = if self.recording.is_some() {
             let rows = Layout::default()
@@ -977,6 +984,28 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
+fn render_header_bar(frame: &mut Frame<'_>, area: Rect) {
+    let header_area = Rect::new(area.x, area.y, area.width, 1);
+    frame.render_widget(Paragraph::new("").style(theme::status_bar()), header_area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" SOSUS", theme::primary_text().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" v{}", env!("CARGO_PKG_VERSION")),
+                theme::secondary_text(),
+            ),
+        ]))
+        .style(theme::status_bar()),
+        header_area,
+    );
+    frame.render_widget(
+        Paragraph::new(" ? Help ")
+            .alignment(ratatui::layout::Alignment::Right)
+            .style(theme::status_bar()),
+        header_area,
+    );
+}
+
 fn centered_rect(width_percent: u16, height_percent: u16, area: Rect) -> Rect {
     let vertical = Layout::vertical([
         Constraint::Percentage((100 - height_percent) / 2),
@@ -1231,7 +1260,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        for content in ["No recordings", "Choose a recording"] {
+        for content in ["SOSUS", "? Help", "No recordings", "Choose a recording"] {
             assert!(rendered.contains(content), "missing content: {content}");
         }
     }
