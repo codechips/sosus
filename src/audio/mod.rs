@@ -1,5 +1,6 @@
 //! Recording, mixing, and WAV writing.
 
+mod echo;
 mod level;
 mod mic;
 mod permission;

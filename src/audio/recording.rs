@@ -12,6 +12,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use super::{
+    echo::EchoCanceller,
     mic::{MicrophoneCapture, MicrophoneCaptureError, MicrophoneReader},
     tap::{SystemAudioCapture, SystemAudioCaptureError, SystemAudioReader},
     wav::{RECORDING_SAMPLE_RATE, RecordingWavError, RecordingWavSink},
@@ -43,6 +44,7 @@ pub struct RecordingSession {
     microphone_failed: bool,
     system_peak: f32,
     microphone_peak: f32,
+    echo_canceller: EchoCanceller,
 }
 
 impl RecordingSession {
@@ -100,6 +102,7 @@ impl RecordingSession {
             microphone_failed: false,
             system_peak: 0.0,
             microphone_peak: 0.0,
+            echo_canceller: EchoCanceller::default(),
         })
     }
 
@@ -212,6 +215,7 @@ impl RecordingSession {
         for _ in 0..due {
             let system = self.system_ready.pop_front().unwrap_or(0.0);
             let microphone = self.microphone_ready.pop_front().unwrap_or(0.0);
+            let microphone = self.echo_canceller.process(system, microphone);
             self.mix
                 .push((system * DEFAULT_GAIN + microphone * DEFAULT_GAIN).clamp(-1.0, 1.0));
         }
