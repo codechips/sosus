@@ -503,8 +503,14 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
         .context("recording permissions are required")?;
 
     let started_at = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-    let (meeting_dir, mut session) =
-        audio::RecordingSession::start_new_meeting(&app_paths, started_at)?;
+    let (meeting_dir, mut session) = audio::RecordingSession::start_new_meeting_with_mix_settings(
+        &app_paths,
+        started_at,
+        audio::MixSettings::from_db(
+            effective.effective.audio.system_gain_db,
+            effective.effective.audio.mic_gain_db,
+        ),
+    )?;
     let formats = session.source_formats();
     tracing::info!(
         event = "recording_started",
@@ -632,6 +638,10 @@ async fn run_tui(cli: &Cli) -> anyhow::Result<()> {
             .collect(),
         recording: Some(crate::tui::RecordingStartup {
             app_paths: app_paths.clone(),
+            mix_settings: audio::MixSettings::from_db(
+                effective.effective.audio.system_gain_db,
+                effective.effective.audio.mic_gain_db,
+            ),
         }),
     };
     crate::tui::run(startup).await

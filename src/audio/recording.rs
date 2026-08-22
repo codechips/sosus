@@ -20,7 +20,32 @@ use super::{
 use crate::paths::AppPaths;
 
 const SOURCE_BUFFER_FRAMES: usize = 8_192;
-const DEFAULT_GAIN: f32 = 0.707_945_76; // -3 dB
+const DEFAULT_GAIN_DB: f32 = -3.0;
+const LIMITER_CEILING: f32 = 0.891_250_9; // -1 dBFS
+const LIMITER_LOOKAHEAD_SAMPLES: usize = 240; // 5 ms at 48 kHz
+const LIMITER_RELEASE_SAMPLES: f32 = 4_800.0; // 100 ms at 48 kHz
+
+/// Per-source gain applied before combining system audio and microphone input.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MixSettings {
+    system_gain: f32,
+    microphone_gain: f32,
+}
+
+impl MixSettings {
+    pub fn from_db(system_gain_db: f64, microphone_gain_db: f64) -> Self {
+        Self {
+            system_gain: db_to_gain(system_gain_db as f32),
+            microphone_gain: db_to_gain(microphone_gain_db as f32),
+        }
+    }
+}
+
+impl Default for MixSettings {
+    fn default() -> Self {
+        Self::from_db(f64::from(DEFAULT_GAIN_DB), f64::from(DEFAULT_GAIN_DB))
+    }
+}
 
 /// A live core recording. Call [`pump`](Self::pump) regularly from a non-real-time task.
 pub struct RecordingSession {
@@ -38,6 +63,7 @@ pub struct RecordingSession {
     system_output: Vec<f32>,
     microphone_output: Vec<f32>,
     mix: Vec<f32>,
+    mixed_samples_processed: u64,
     started: Instant,
     system_dropouts: u64,
     microphone_dropouts: u64,
@@ -46,18 +72,21 @@ pub struct RecordingSession {
     microphone_peak: f32,
     echo_canceller: EchoCanceller,
     microphone_muted: bool,
+    mix_settings: MixSettings,
+    limiter: LookaheadLimiter,
 }
 
 impl RecordingSession {
     /// Reserve a meeting folder and start recording, removing the reservation if capture cannot
     /// be initialized. This prevents failed starts from appearing as empty recordings.
-    pub fn start_new_meeting(
+    pub fn start_new_meeting_with_mix_settings(
         app_paths: &AppPaths,
         started_at: OffsetDateTime,
+        mix_settings: MixSettings,
     ) -> anyhow::Result<(PathBuf, Self)> {
         let meeting_dir = app_paths.create_meeting_dir(started_at)?;
         let recording_path = meeting_dir.join("recording.wav");
-        match Self::start(&recording_path) {
+        match Self::start_with_mix_settings(&recording_path, mix_settings) {
             Ok(session) => Ok((meeting_dir, session)),
             Err(error) => {
                 if let Err(cleanup_error) = remove_failed_meeting_dir(&meeting_dir) {
@@ -75,7 +104,10 @@ impl RecordingSession {
     }
 
     /// Start both required sources and create a new canonical WAV sink.
-    pub fn start(path: impl AsRef<Path>) -> Result<Self, RecordingError> {
+    pub fn start_with_mix_settings(
+        path: impl AsRef<Path>,
+        mix_settings: MixSettings,
+    ) -> Result<Self, RecordingError> {
         let (system_capture, system_reader) = SystemAudioCapture::start_default()?;
         let (microphone_capture, microphone_reader) = MicrophoneCapture::start_default()?;
         let sink = RecordingWavSink::create(path)?;
@@ -97,6 +129,7 @@ impl RecordingSession {
             system_output: Vec::with_capacity(SOURCE_BUFFER_FRAMES * 2),
             microphone_output: Vec::with_capacity(SOURCE_BUFFER_FRAMES * 2),
             mix: Vec::with_capacity(SOURCE_BUFFER_FRAMES * 2),
+            mixed_samples_processed: 0,
             started: Instant::now(),
             system_dropouts: 0,
             microphone_dropouts: 0,
@@ -105,6 +138,8 @@ impl RecordingSession {
             microphone_peak: 0.0,
             echo_canceller: EchoCanceller::default(),
             microphone_muted: false,
+            mix_settings,
+            limiter: LookaheadLimiter::default(),
         })
     }
 
@@ -127,6 +162,9 @@ impl RecordingSession {
         self.drain_microphone();
         self.drain_system();
         self.write_due_samples()?;
+        self.mix.clear();
+        self.mix.extend(self.limiter.finish());
+        self.sink.write_samples(&self.mix)?;
 
         let samples_written = self.sink.samples_written();
         let path = self.sink.path().to_path_buf();
@@ -226,7 +264,7 @@ impl RecordingSession {
     fn write_due_samples(&mut self) -> Result<(), RecordingError> {
         let due = samples_due(
             self.started.elapsed().as_secs_f64(),
-            self.sink.samples_written(),
+            self.mixed_samples_processed,
         );
         self.mix.clear();
         self.mix.reserve(due);
@@ -234,8 +272,15 @@ impl RecordingSession {
             let system = self.system_ready.pop_front().unwrap_or(0.0);
             let microphone = self.microphone_ready.pop_front().unwrap_or(0.0);
             let microphone = self.echo_canceller.process(system, microphone);
-            self.mix
-                .push(mix_sample(system, microphone, self.microphone_muted));
+            if let Some(sample) = self.limiter.process(mix_sample(
+                system,
+                microphone,
+                self.microphone_muted,
+                self.mix_settings,
+            )) {
+                self.mix.push(sample);
+            }
+            self.mixed_samples_processed = self.mixed_samples_processed.saturating_add(1);
         }
         self.sink.write_samples(&self.mix)?;
         Ok(())
@@ -255,9 +300,81 @@ fn peak(samples: &[f32]) -> f32 {
         .min(1.0)
 }
 
-fn mix_sample(system: f32, microphone: f32, microphone_muted: bool) -> f32 {
+fn db_to_gain(db: f32) -> f32 {
+    10.0_f32.powf(db / 20.0)
+}
+
+fn mix_sample(system: f32, microphone: f32, microphone_muted: bool, settings: MixSettings) -> f32 {
     let microphone = if microphone_muted { 0.0 } else { microphone };
-    (system * DEFAULT_GAIN + microphone * DEFAULT_GAIN).clamp(-1.0, 1.0)
+    system * settings.system_gain + microphone * settings.microphone_gain
+}
+
+/// A short look-ahead limiter. It is intentionally owned by the recording worker,
+/// never by an audio callback.
+struct LookaheadLimiter {
+    pending: VecDeque<f32>,
+    gain: f32,
+}
+
+impl Default for LookaheadLimiter {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::with_capacity(LIMITER_LOOKAHEAD_SAMPLES + 1),
+            gain: 1.0,
+        }
+    }
+}
+
+impl LookaheadLimiter {
+    fn process(&mut self, sample: f32) -> Option<f32> {
+        self.pending.push_back(sample);
+        if self.pending.len() <= LIMITER_LOOKAHEAD_SAMPLES {
+            return None;
+        }
+
+        let peak = self
+            .pending
+            .iter()
+            .copied()
+            .map(f32::abs)
+            .fold(0.0_f32, f32::max);
+        let target_gain = if peak > LIMITER_CEILING {
+            LIMITER_CEILING / peak
+        } else {
+            1.0
+        };
+        self.gain = if target_gain < self.gain {
+            target_gain
+        } else {
+            (self.gain + (1.0 - self.gain) / LIMITER_RELEASE_SAMPLES).min(target_gain)
+        };
+
+        self.pending.pop_front().map(|sample| sample * self.gain)
+    }
+
+    fn finish(&mut self) -> Vec<f32> {
+        let mut output = Vec::with_capacity(self.pending.len());
+        while !self.pending.is_empty() {
+            let peak = self
+                .pending
+                .iter()
+                .copied()
+                .map(f32::abs)
+                .fold(0.0_f32, f32::max);
+            let target_gain = if peak > LIMITER_CEILING {
+                LIMITER_CEILING / peak
+            } else {
+                1.0
+            };
+            self.gain = if target_gain < self.gain {
+                target_gain
+            } else {
+                (self.gain + (1.0 - self.gain) / LIMITER_RELEASE_SAMPLES).min(target_gain)
+            };
+            output.push(self.pending.pop_front().expect("queue is non-empty") * self.gain);
+        }
+        output
+    }
 }
 
 fn samples_due(elapsed_seconds: f64, samples_written: u64) -> usize {
@@ -420,8 +537,38 @@ mod tests {
 
     #[test]
     fn microphone_mute_preserves_system_audio_and_timeline_samples() {
-        let mixed = mix_sample(0.8, 0.6, true);
-        assert_eq!(mixed, 0.8 * DEFAULT_GAIN);
+        let settings = MixSettings::default();
+        let mixed = mix_sample(0.8, 0.6, true, settings);
+        assert_eq!(mixed, 0.8 * settings.system_gain);
         assert_ne!(mixed, 0.0);
+    }
+
+    #[test]
+    fn source_gains_are_independent() {
+        let settings = MixSettings::from_db(-6.0, 0.0);
+
+        assert_eq!(mix_sample(1.0, 0.0, false, settings), settings.system_gain);
+        assert_eq!(
+            mix_sample(0.0, 1.0, false, settings),
+            settings.microphone_gain
+        );
+    }
+
+    #[test]
+    fn limiter_prevents_full_scale_sources_from_clipping() {
+        let mut limiter = LookaheadLimiter::default();
+        let settings = MixSettings::default();
+        let mut output = Vec::new();
+
+        for _ in 0..(LIMITER_LOOKAHEAD_SAMPLES * 2) {
+            if let Some(sample) = limiter.process(mix_sample(1.0, 1.0, false, settings)) {
+                output.push(sample);
+            }
+        }
+        output.extend(limiter.finish());
+
+        assert!(!output.is_empty());
+        let max = output.iter().copied().map(f32::abs).fold(0.0_f32, f32::max);
+        assert!(max <= LIMITER_CEILING + 0.000_001, "max output was {max}");
     }
 }

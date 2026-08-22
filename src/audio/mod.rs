@@ -9,4 +9,4 @@ mod tap;
 mod wav;
 
 pub(crate) use permission::ensure_capture_permissions;
-pub(crate) use recording::RecordingSession;
+pub(crate) use recording::{MixSettings, RecordingSession};

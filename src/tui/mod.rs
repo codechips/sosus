@@ -377,8 +377,11 @@ impl App {
             .context("recording is not configured")?;
         audio::ensure_capture_permissions().await?;
         let started_at = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-        let (meeting_dir, session) =
-            audio::RecordingSession::start_new_meeting(&context.app_paths, started_at)?;
+        let (meeting_dir, session) = audio::RecordingSession::start_new_meeting_with_mix_settings(
+            &context.app_paths,
+            started_at,
+            context.mix_settings,
+        )?;
         self.recording = Some(ActiveRecording {
             session,
             meeting_dir,
@@ -553,6 +556,7 @@ pub struct Startup {
 
 pub struct RecordingStartup {
     pub app_paths: AppPaths,
+    pub mix_settings: audio::MixSettings,
 }
 
 struct ActiveRecording {
