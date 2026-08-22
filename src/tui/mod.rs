@@ -33,6 +33,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 
@@ -244,7 +245,8 @@ impl App {
 
     fn handle_pipeline_event(&mut self, event: PipelineEvent) {
         match event {
-            PipelineEvent::WorkStarted => self.pipeline_status = Some("Running".to_owned()),
+            PipelineEvent::WorkStarted => self.pipeline_status = Some("Starting pipeline".to_owned()),
+            PipelineEvent::Stage(stage) => self.pipeline_status = Some(stage),
             PipelineEvent::WorkProgress { completed, total } => {
                 self.pipeline_status = Some(format!("Running {completed}/{total}"));
             }
@@ -460,10 +462,33 @@ fn launch_pipeline(app: &App, meeting_id: i64, events: &mpsc::UnboundedSender<Pi
             .args(["--output-dir"])
             .arg(output_dir)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await;
-        match result {
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        let mut child = match result {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = events.send(PipelineEvent::WorkFailed(error.to_string()));
+                return;
+            }
+        };
+        if let Some(stderr) = child.stderr.take() {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let stage = if line.starts_with("Transcribing ") {
+                    Some("Transcribing")
+                } else if line.starts_with("Diarizing ") {
+                    Some("Diarizing")
+                } else if line.starts_with("Saved summary:") {
+                    Some("Exporting")
+                } else {
+                    None
+                };
+                if let Some(stage) = stage {
+                    let _ = events.send(PipelineEvent::Stage(stage.to_owned()));
+                }
+            }
+        }
+        match child.wait().await {
             Ok(status) if status.success() => {
                 let _ = events.send(PipelineEvent::WorkCompleted);
             }

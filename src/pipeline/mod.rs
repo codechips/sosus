@@ -276,6 +276,7 @@ pub enum Command {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppEvent {
     WorkStarted,
+    Stage(String),
     WorkProgress { completed: u16, total: u16 },
     WorkCompleted,
     WorkCancelled,
