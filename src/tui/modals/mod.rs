@@ -1,3 +1,3 @@
 //! TUI modal dialogs.
 
-mod settings;
+pub(crate) mod settings;

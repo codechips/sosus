@@ -8,7 +8,9 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use toml_edit::{DocumentMut, Item, Table, value};
 
 pub use crate::asr::TranscriptionBackend;
 #[cfg(test)]
@@ -549,6 +551,129 @@ pub enum ConfigError {
     },
     #[error("invalid configuration key `{key}`: {message}")]
     Invalid { key: String, message: String },
+    #[error("settings changed on disk; close and reopen Settings before saving")]
+    Changed,
+    #[error("could not write config `{path}`: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// A fingerprint of the config file when a settings session was opened.
+///
+/// Keeping this in the UI lets us refuse to overwrite a file changed by another
+/// process while the dialog was open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigFingerprint(Option<[u8; 32]>);
+
+pub fn fingerprint(path: &Path) -> Result<ConfigFingerprint, ConfigError> {
+    match fs::read(path) {
+        Ok(contents) => Ok(ConfigFingerprint(Some(Sha256::digest(contents).into()))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ConfigFingerprint(None)),
+        Err(source) => Err(ConfigError::Read {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+/// Persist the small set of settings exposed in the TUI without rewriting
+/// comments, whitespace, unknown keys, or the rest of the configuration.
+pub fn save_tui_settings(
+    path: &Path,
+    expected: &ConfigFingerprint,
+    config: &Config,
+) -> Result<ConfigFingerprint, ConfigError> {
+    config.validate()?;
+    let input = match fs::read_to_string(path) {
+        Ok(input) => input,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(ConfigError::Read {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    let current = ConfigFingerprint(Some(Sha256::digest(input.as_bytes()).into()));
+    let current = if input.is_empty() && !path.exists() {
+        ConfigFingerprint(None)
+    } else {
+        current
+    };
+    if &current != expected {
+        return Err(ConfigError::Changed);
+    }
+
+    let mut document = input
+        .parse::<DocumentMut>()
+        .map_err(|error| invalid("<document>", error.to_string()))?;
+    let audio = table_mut(&mut document, "audio");
+    audio["mic"] = value(config.audio.mic);
+    audio["system_gain_db"] = value(config.audio.system_gain_db);
+    audio["mic_gain_db"] = value(config.audio.mic_gain_db);
+
+    let transcription = table_mut(&mut document, "transcription");
+    transcription["backend"] = value(config.transcription.backend.to_string());
+    transcription["language"] = value(config.transcription.language.clone());
+    if config.transcription.backend == TranscriptionBackend::Parakeet {
+        transcription.remove("model");
+    }
+
+    let diarization = table_mut(&mut document, "diarization");
+    diarization["enabled"] = value(config.diarization.enabled);
+    let output = table_mut(&mut document, "output");
+    output["json"] = value(config.output.json);
+
+    write_private_atomic(path, document.to_string().as_bytes())?;
+    fingerprint(path)
+}
+
+fn table_mut<'a>(document: &'a mut DocumentMut, name: &str) -> &'a mut Table {
+    if !document.as_table().contains_key(name) {
+        document[name] = Item::Table(Table::new());
+    }
+    document[name]
+        .as_table_mut()
+        .expect("configuration section should be a table")
+}
+
+fn write_private_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("config", "has no parent directory"))?;
+    fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+        path: path.to_owned(),
+        source,
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config"),
+        std::process::id()
+    ));
+    let result = (|| -> io::Result<()> {
+        fs::write(&temporary, contents)?;
+        #[cfg(unix)]
+        fs::set_permissions(
+            &temporary,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
+        fs::File::open(&temporary)?.sync_all()?;
+        fs::rename(&temporary, path)?;
+        fs::File::open(parent)?.sync_all()
+    })();
+    if let Err(source) = result {
+        let _ = fs::remove_file(&temporary);
+        return Err(ConfigError::Write {
+            path: path.to_owned(),
+            source,
+        });
+    }
+    Ok(())
 }
 
 pub fn parse(input: &str) -> Result<LoadedConfig, ConfigError> {
@@ -741,6 +866,38 @@ mod tests {
             loaded.config.output.dir,
             PathBuf::from("~/sosus/recordings")
         );
+    }
+
+    #[test]
+    fn tui_settings_save_preserves_unrelated_configuration_and_rejects_conflicts() {
+        let directory =
+            std::env::temp_dir().join(format!("sosus-config-test-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.toml");
+        fs::write(
+            &path,
+            "# keep this comment\n[custom]\nanswer = 42\n\n[audio]\nmic = true\n",
+        )
+        .unwrap();
+        let expected = fingerprint(&path).unwrap();
+        let mut config = load(&path).unwrap().config;
+        config.audio.mic = false;
+        config.output.json = true;
+
+        let saved = save_tui_settings(&path, &expected, &config).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("# keep this comment"));
+        assert!(contents.contains("[custom]"));
+        assert!(contents.contains("answer = 42"));
+        assert!(contents.contains("mic = false"));
+        assert!(contents.contains("json = true"));
+
+        fs::write(&path, "[audio]\nmic = true\n").unwrap();
+        assert!(matches!(
+            save_tui_settings(&path, &saved, &config),
+            Err(ConfigError::Changed)
+        ));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

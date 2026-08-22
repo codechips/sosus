@@ -35,7 +35,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::Modifier,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 use time::OffsetDateTime;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -45,6 +45,7 @@ use tokio::sync::mpsc;
 use crate::{
     archive::{self, Meeting, Segment},
     audio,
+    config::{self, Config, ConfigFingerprint},
     paths::AppPaths,
     pipeline::{self, AppEvent as PipelineEvent},
 };
@@ -95,7 +96,8 @@ struct App {
     error: Option<String>,
     focus: Focus,
     show_help: bool,
-    show_settings: bool,
+    settings: Option<modals::settings::SettingsModal>,
+    settings_context: Option<SettingsContext>,
     confirm_quit_processing: bool,
     delete_confirmation: Option<Meeting>,
     should_quit: bool,
@@ -123,7 +125,12 @@ impl App {
             error: None,
             focus: Focus::Meetings,
             show_help: false,
-            show_settings: false,
+            settings: None,
+            settings_context: startup.settings.map(|settings| SettingsContext {
+                config: settings.config,
+                config_path: settings.config_path,
+                fingerprint: settings.fingerprint,
+            }),
             confirm_quit_processing: false,
             delete_confirmation: None,
             should_quit: false,
@@ -241,9 +248,17 @@ impl App {
             }
         }
 
-        if key.code == KeyCode::Esc && (self.show_help || self.show_settings) {
+        if let Some(settings) = &mut self.settings {
+            match settings.handle_key(key) {
+                modals::settings::SettingsAction::Cancel => self.settings = None,
+                modals::settings::SettingsAction::Save => return Some(AppAction::SaveSettings),
+                modals::settings::SettingsAction::None => {}
+            }
+            return None;
+        }
+
+        if key.code == KeyCode::Esc && self.show_help {
             self.show_help = false;
-            self.show_settings = false;
             return None;
         }
 
@@ -295,7 +310,7 @@ impl App {
                 }
             }
             (KeyCode::Char('?'), _) => self.show_help = !self.show_help,
-            (KeyCode::F(2), _) => self.show_settings = !self.show_settings,
+            (KeyCode::F(2), _) => self.open_settings(),
             (KeyCode::Tab, KeyModifiers::SHIFT) | (KeyCode::BackTab, _) => {
                 self.focus = self.focus.previous();
             }
@@ -309,7 +324,7 @@ impl App {
         if self.error.is_some()
             || !self.warnings.is_empty()
             || self.show_help
-            || self.show_settings
+            || self.settings.is_some()
             || self.confirm_quit_processing
             || self.delete_confirmation.is_some()
         {
@@ -368,6 +383,42 @@ impl App {
         terminal_width
             .saturating_sub(MINIMUM_TRANSCRIPT_WIDTH)
             .max(MINIMUM_SIDEBAR_WIDTH)
+    }
+
+    fn open_settings(&mut self) {
+        let Some(context) = &self.settings_context else {
+            self.error = Some("Settings are not configured for this session".to_owned());
+            return;
+        };
+        self.settings = Some(modals::settings::SettingsModal::new(context.config.clone()));
+    }
+
+    fn save_settings(&mut self) {
+        let Some(settings) = self.settings.take() else {
+            return;
+        };
+        let Some(context) = &mut self.settings_context else {
+            self.error = Some("Settings are not configured for this session".to_owned());
+            return;
+        };
+        match config::save_tui_settings(
+            &context.config_path,
+            &context.fingerprint,
+            settings.config(),
+        ) {
+            Ok(fingerprint) => {
+                context.config = settings.config().clone();
+                context.fingerprint = fingerprint;
+                if let Some(recording) = &mut self.recording_context {
+                    recording.mix_settings = audio::MixSettings::from_db(
+                        context.config.audio.system_gain_db,
+                        context.config.audio.mic_gain_db,
+                    );
+                }
+                self.message = Some("Settings saved · applies to the next operation".to_owned());
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
     }
 
     async fn start_recording(&mut self) -> anyhow::Result<()> {
@@ -537,8 +588,8 @@ impl App {
             );
         } else if self.show_help {
             render_help(frame, centered_rect(64, 68, area));
-        } else if self.show_settings {
-            render_settings_preview(frame, centered_rect(64, 50, area));
+        } else if let Some(settings) = &self.settings {
+            render_settings(frame, settings, centered_rect(58, 78, area));
         } else if self.confirm_quit_processing {
             render_quit_processing_confirmation(frame, centered_rect(54, 28, area));
         } else if let Some(meeting) = &self.delete_confirmation {
@@ -552,11 +603,25 @@ pub struct Startup {
     pub archive_dir: String,
     pub warnings: Vec<String>,
     pub recording: Option<RecordingStartup>,
+    pub settings: Option<SettingsStartup>,
 }
 
 pub struct RecordingStartup {
     pub app_paths: AppPaths,
     pub mix_settings: audio::MixSettings,
+    pub config_path: PathBuf,
+}
+
+pub struct SettingsStartup {
+    pub config: Config,
+    pub config_path: PathBuf,
+    pub fingerprint: ConfigFingerprint,
+}
+
+struct SettingsContext {
+    config: Config,
+    config_path: PathBuf,
+    fingerprint: ConfigFingerprint,
 }
 
 struct ActiveRecording {
@@ -573,6 +638,7 @@ enum AppAction {
     TranscribeMeeting(PathBuf),
     OpenMeetingFolder(PathBuf),
     TrashMeetingFolder(PathBuf),
+    SaveSettings,
 }
 
 fn microphone_mute_action(recording_active: bool) -> Option<AppAction> {
@@ -669,6 +735,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                                     Err(error) => app.error = Some(format!("{error:#}")),
                                 }
                             }
+                            Some(AppAction::SaveSettings) => app.save_settings(),
                             None => {}
                         }
                     }
@@ -719,12 +786,15 @@ fn launch_pipeline(
         return;
     };
     let output_dir = context.app_paths.output_dir().to_path_buf();
+    let config_path = context.config_path.clone();
     app.handle_pipeline_event(PipelineEvent::WorkStarted);
     let events = events.clone();
     tokio::spawn(async move {
         let result = TokioCommand::new(std::env::current_exe().expect("current executable"))
             .args(["resume"])
             .arg(recording_path)
+            .args(["--config"])
+            .arg(config_path)
             .args(["--output-dir"])
             .arg(output_dir)
             .stdout(std::process::Stdio::null())
@@ -977,7 +1047,7 @@ fn render_too_small(frame: &mut Frame<'_>, area: Rect) {
 fn render_help(frame: &mut Frame<'_>, area: Rect) {
     let content = Text::from(vec![
         Line::from("Tab / Shift+Tab  Move focus"),
-        Line::from("F2               Settings preview"),
+        Line::from("F2               Settings"),
         Line::from("r                Start / stop recording"),
         Line::from("m                Mute / unmute microphone"),
         Line::from("t                Transcribe selected recording"),
@@ -991,20 +1061,40 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Help")
-        .style(theme::overlay());
+        .style(theme::overlay())
+        .padding(Padding::uniform(1));
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(content).block(block), area);
 }
 
-fn render_settings_preview(frame: &mut Frame<'_>, area: Rect) {
-    let content = Text::from(vec![
-        Line::styled("Settings arrive later in M0.", theme::primary_text()),
-        Line::styled("Press Esc to return.", theme::secondary_text()),
+fn render_settings(frame: &mut Frame<'_>, settings: &modals::settings::SettingsModal, area: Rect) {
+    let mut content = vec![
+        Line::styled(
+            "Changes apply to the next recording or transcription.",
+            theme::secondary_text(),
+        ),
+        Line::from(""),
+    ];
+    for (label, value, selected) in settings.rows() {
+        let line = Line::from(format!("{label:<18} {value}"));
+        content.push(if selected {
+            line.style(theme::selected_row())
+        } else {
+            line.style(theme::primary_text())
+        });
+    }
+    content.extend([
+        Line::from(""),
+        Line::styled(
+            "← → change · Enter save · Esc cancel",
+            theme::secondary_text(),
+        ),
     ]);
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Settings")
-        .style(theme::overlay());
+        .style(theme::overlay())
+        .padding(Padding::uniform(1));
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(content).block(block), area);
 }
@@ -1018,7 +1108,8 @@ fn render_notice(frame: &mut Frame<'_>, title: &str, message: &str, area: Rect) 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .style(theme::overlay());
+        .style(theme::overlay())
+        .padding(Padding::uniform(1));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(content)
@@ -1042,7 +1133,8 @@ fn render_quit_processing_confirmation(frame: &mut Frame<'_>, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Processing")
-        .style(theme::overlay());
+        .style(theme::overlay())
+        .padding(Padding::uniform(1));
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(content).block(block), area);
 }
@@ -1061,7 +1153,8 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, meeting_name: &str, area: R
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Delete recording")
-        .style(theme::overlay());
+        .style(theme::overlay())
+        .padding(Padding::uniform(1));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(content)
@@ -1159,6 +1252,7 @@ mod tests {
             archive_dir: "/tmp/sosus-test-recordings".to_owned(),
             warnings: Vec::new(),
             recording: None,
+            settings: None,
         })
     }
 
@@ -1504,6 +1598,7 @@ mod tests {
             archive_dir: "/tmp/sosus-test-recordings".to_owned(),
             warnings: vec!["first".to_owned(), "second".to_owned()],
             recording: None,
+            settings: None,
         });
         assert_eq!(app.warnings.front().map(String::as_str), Some("first"));
 

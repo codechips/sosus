@@ -644,6 +644,12 @@ async fn run_tui(cli: &Cli) -> anyhow::Result<()> {
                 effective.effective.audio.system_gain_db,
                 effective.effective.audio.mic_gain_db,
             ),
+            config_path: effective.locations.config_path.clone(),
+        }),
+        settings: Some(crate::tui::SettingsStartup {
+            config: effective.saved,
+            config_path: effective.locations.config_path.clone(),
+            fingerprint: config::fingerprint(&effective.locations.config_path)?,
         }),
     };
     crate::tui::run(startup).await
