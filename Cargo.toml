@@ -6,6 +6,10 @@ rust-version = "1.88"
 license = "MIT"
 description = "Local-first meeting intelligence for macOS"
 
+[features]
+default = []
+model-tests = []
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

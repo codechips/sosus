@@ -156,7 +156,7 @@ Initial releases use this manual local process. The Developer ID private key sta
 
 ### 4.3 Distribution constraints
 
-A notarization ticket **cannot be stapled to a bare Mach-O binary**. Stapling works only for `.app`, `.dmg` and `.pkg`. A notarized bare binary still passes Gatekeeper, but only when the machine is online, where the ticket is fetched and cached.
+A notarization ticket **cannot be stapled to a bare Mach-O binary**. Stapling works only for `.app`, `.dmg` and `.pkg`. A notarized bare binary still passes Gatekeeper, but only when the machine is online, where the ticket is fetched and cached. Verify that online ticket with `codesign -vvvv -R="notarized" --check-notarization <binary>`. `spctl --assess` is not a valid acceptance check for a bare command-line Mach-O because it classifies the executable as non-app code; reserve `spctl` for supported containers such as `.app`, `.dmg` and `.pkg`.
 
 Practical consequence: a browser or `curl` download of the bare binary triggers Gatekeeper once. Ship a notarized `.pkg` alongside for a clean offline first run. Do not confuse Gatekeeper acceptance with TCC identity: a Homebrew package can install successfully while still failing to receive audio-capture permission if the installed executable does not retain a suitable signing identity.
 
@@ -1169,7 +1169,7 @@ Repository scaffold per [§6.2](#62-module-layout). ratatui shell with four pane
 
 > **Do the notarization dry run first.** Newer individual Apple Developer enrollments have been hitting `Error 7000: Team is not yet configured for notarization`, taking days to clear. Discover that now, not at M3.
 
-**Exit:** TUI launches and quits cleanly, restoring the terminal including on panic. Database created and migrated. A signed, notarized hello-world binary has passed `spctl --assess`.
+**Exit:** TUI launches and quits cleanly, restoring the terminal including on panic. Database created and migrated. A signed, notarized hello-world binary has passed `codesign -vvvv -R="notarized" --check-notarization`.
 
 ### M1 — Transcription and diarization on existing files
 

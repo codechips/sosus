@@ -20,3 +20,41 @@ run = "cargo clippy --all-targets -- -D warnings"
 [tasks.format]
 description = "Format Rust source"
 run = "cargo fmt"
+
+[tasks.ci]
+description = "Run the model-free CI quality gates locally"
+run = """
+cargo fmt --all -- --check
+scripts/check-repository-assets.sh
+cargo fetch --locked --target aarch64-apple-darwin
+CARGO_NET_OFFLINE=true cargo clippy --locked --all-targets --no-default-features -- -D warnings
+CARGO_NET_OFFLINE=true /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' cargo test --locked --all-targets --no-default-features
+"""
+
+[tasks.release-preflight]
+description = "Check local Developer ID and notary profile references"
+run = "scripts/release-macos.sh preflight"
+
+[tasks.release-build]
+description = "Build the macOS release binary and verify its embedded Info.plist"
+run = "scripts/release-macos.sh build"
+
+[tasks.release-sign]
+description = "Sign and verify the macOS release binary using the local keychain"
+run = "scripts/release-macos.sh sign"
+
+[tasks.release-verify]
+description = "Verify the macOS release identity, runtime, plist, and entitlements"
+run = "scripts/release-macos.sh verify"
+
+[tasks.release-verify-notarization]
+description = "Verify Apple's online notarization ticket for the bare executable"
+run = "scripts/release-macos.sh verify-notarization"
+
+[tasks.release-notarize]
+description = "Submit the signed macOS release binary and verify Apple's online ticket"
+run = "scripts/release-macos.sh notarize"
+
+[tasks.release]
+description = "Build, sign, notarize, and verify the macOS release binary"
+run = "scripts/release-macos.sh release"
