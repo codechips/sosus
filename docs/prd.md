@@ -1171,6 +1171,14 @@ Repository scaffold per [§6.2](#62-module-layout). ratatui shell with four pane
 
 **Exit:** TUI launches and quits cleanly, restoring the terminal including on panic. Database created and migrated. A signed, notarized hello-world binary has passed `codesign -vvvv -R="notarized" --check-notarization`.
 
+### M0.5 — Core recording vertical slice
+
+Build the product's essential loop before the processing stack: the signed app captures all system audio except itself plus the default microphone, mixes them into one mono stream, writes a private 48 kHz signed 16-bit PCM `recording.wav`, and exposes start and clean stop through both CLI and TUI. This slice intentionally uses all-system capture and default settings so it is not blocked on per-process identity decisions or advanced controls.
+
+Advanced gains, limiting, adaptive clock-drift correction, source meters, mute, auto-stop, per-process selection, exhaustive failure injection and long-duration tests remain in M3. The core slice must nevertheless use the same durable meeting folder and bounded callback-to-writer boundary so it can be hardened without replacement.
+
+**Exit:** A signed build records a real five-minute meeting with system audio and the default microphone both audible in a valid mono 48 kHz signed 16-bit PCM WAV. CLI and TUI start and stop cleanly, the owned meeting folder and database row exist, and a checkpointed file remains readable if capture is interrupted.
+
 ### M1 — Transcription and diarization on existing files
 
 `sosus transcribe <file>` and `sosus import <dir>`. symphonia decode, rubato resample, **both ASR backends** behind the `Transcriber` trait, sherpa-onnx diarization, overlap-based speaker assignment, custom vocabulary on both paths. Model download with SHA-256 verification and TUI progress. Markdown and JSON export.
@@ -1187,9 +1195,9 @@ llama-cpp-2 with context budgeting, chunking and map-reduce. Templates and displ
 
 **Exit:** Chat answers a question about a meeting from three months ago with a valid passage marker that renders as a citation and jumps the Transcript pane to the right timestamp. A fabricated marker, a marker for a passage outside the supplied context, a partially fabricated long quote and an uncited factual sentence are all rejected or visibly marked. `reindex` rebuilds cleanly and passes FTS external-content integrity verification.
 
-### M3 — Recording
+### M3 — Recording hardening
 
-Core Audio tap capture, cpal microphone, 32-bit-float mixing with adjustable source gains and peak limiting, 16-bit mono/48 kHz WAV writing, source-specific activity monitoring, mute toggle, silence auto-stop, permission checks with actionable messaging.
+Harden the core recording slice with per-process Core Audio tap capture, adaptive source alignment, adjustable gains and peak limiting, source-specific activity monitoring, mute, silence auto-stop, failure recovery and exhaustive real-hardware coverage.
 
 **Exit:** A real meeting records end to end with both sides audible in a valid 16-bit mono/48 kHz WAV. Changing each source gain measurably changes only that source in the next recording, and full-scale simultaneous test signals never exceed the `-1.0` dBFS limiter ceiling. System-only and microphone-only test signals animate only their respective source rows, while the `Recording` row reflects the written mix. Mute changes the microphone row to `MUTED` and removes it from the mixed signal; source clipping, limiter engagement, dropouts and microphone loss are visibly distinct. Auto-stop fires, and a `SIGKILL` at arbitrary points leaves a playable WAV through the most recent one-second checkpoint. A two-hour dual-clock fixture stays within 50 ms alignment. Permission revocation and microphone loss produce clear messages, never silent failure, and no sosus-owned aggregate device remains after the recovery test.
 

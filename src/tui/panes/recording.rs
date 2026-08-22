@@ -20,7 +20,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, focused: bool) {
             Span::styled("Status  ", theme::secondary_text()),
             Span::styled("UNAVAILABLE", theme::warning_text()),
         ]),
-        Line::styled("Capture arrives in M3.", theme::secondary_text()),
+        Line::styled(
+            "Core recording is being built now.",
+            theme::secondary_text(),
+        ),
     ]);
     let block = Block::default()
         .borders(Borders::ALL)
