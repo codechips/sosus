@@ -7,7 +7,10 @@ REPOSITORY_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BINARY="$REPOSITORY_ROOT/target/aarch64-apple-darwin/release/sosus"
 ENTITLEMENTS="$REPOSITORY_ROOT/packaging/macos/sosus.entitlements"
 DIST_DIRECTORY="$REPOSITORY_ROOT/dist"
-ARCHIVE="$DIST_DIRECTORY/sosus-aarch64-apple-darwin.zip"
+RELEASE_VERSION=""
+RELEASE_DATE=""
+ARCHIVE=""
+CHECKSUM=""
 SIGNING_IDENTITY=""
 TEMPORARY_FILES=("")
 
@@ -45,6 +48,27 @@ assert_regular_binary() {
     [ -f "$BINARY" ] || fail "release binary not found; build it first"
     [ ! -L "$BINARY" ] || fail "release binary must not be a symbolic link"
     [ -x "$BINARY" ] || fail "release artifact is not executable"
+}
+
+release_version() {
+    RELEASE_VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$REPOSITORY_ROOT/Cargo.toml")
+    [ -n "$RELEASE_VERSION" ] || fail "could not read the package version from Cargo.toml"
+    if ! [[ "$RELEASE_VERSION" =~ ^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-beta\.[1-9][0-9]*|-r[2-9][0-9]*)?$ ]]; then
+        fail "release version must use YYYY.M.D, YYYY.M.D-beta.N, or YYYY.M.D-rN"
+    fi
+    RELEASE_DATE=${RELEASE_VERSION%%-*}
+    RELEASE_DATE=${RELEASE_DATE//./-}
+    ARCHIVE="$DIST_DIRECTORY/sosus-${RELEASE_DATE}${RELEASE_VERSION#${RELEASE_VERSION%%-*}}-macos-arm64.zip"
+    CHECKSUM="$ARCHIVE.sha256"
+}
+
+assert_release_tag() {
+    release_version
+    [ -z "$(git status --porcelain)" ] || fail "release requires a clean working tree"
+    git rev-parse --verify --quiet "refs/tags/v$RELEASE_VERSION" >/dev/null \
+        || fail "release requires the v$RELEASE_VERSION tag"
+    [ "$(git rev-list -n 1 "v$RELEASE_VERSION")" = "$(git rev-parse HEAD)" ] \
+        || fail "v$RELEASE_VERSION must point at HEAD"
 }
 
 plist_value() {
@@ -89,6 +113,10 @@ verify_info_plist() {
     fi
     assert_plist_value "$extracted" CFBundleIdentifier dev.sosus.cli
     assert_plist_value "$extracted" CFBundleName sosus
+    release_version
+    assert_plist_value "$extracted" CFBundleShortVersionString "${RELEASE_VERSION%%-*}"
+    assert_plist_value "$extracted" CFBundleVersion "${RELEASE_VERSION%%-*}"
+    assert_plist_value "$extracted" CFBundleGetInfoString "sosus $RELEASE_VERSION"
     assert_plist_value \
         "$extracted" \
         NSAudioCaptureUsageDescription \
@@ -131,6 +159,7 @@ verify_identity_available() {
 }
 
 preflight() {
+    assert_release_tag
     verify_identity_available
     [ -n "${SOSUS_NOTARY_PROFILE:-}" ] \
         || fail "set SOSUS_NOTARY_PROFILE to a notarytool keychain profile"
@@ -196,6 +225,7 @@ notarize_release() {
     [ -n "${SOSUS_NOTARY_PROFILE:-}" ] \
         || fail "set SOSUS_NOTARY_PROFILE to a notarytool keychain profile"
     verify_signature
+    release_version
     [ ! -L "$DIST_DIRECTORY" ] || fail "dist directory must not be a symbolic link"
     mkdir -p "$DIST_DIRECTORY"
     chmod 700 "$DIST_DIRECTORY"
@@ -204,8 +234,15 @@ notarize_release() {
             || fail "release archive path is not a regular file"
         unlink "$ARCHIVE"
     fi
+    if [ -e "$CHECKSUM" ]; then
+        [ -f "$CHECKSUM" ] && [ ! -L "$CHECKSUM" ] \
+            || fail "release checksum path is not a regular file"
+        unlink "$CHECKSUM"
+    fi
     /usr/bin/ditto -c -k --keepParent "$BINARY" "$ARCHIVE"
     chmod 600 "$ARCHIVE"
+    /usr/bin/shasum -a 256 "$ARCHIVE" >"$CHECKSUM"
+    chmod 600 "$CHECKSUM"
     make_temporary_file result sosus-notary-result
     if ! /usr/bin/xcrun notarytool submit \
         "$ARCHIVE" \
@@ -237,9 +274,11 @@ require_command /usr/bin/awk
 require_command /usr/bin/codesign
 require_command /usr/bin/ditto
 require_command /usr/bin/file
+require_command git
 require_command /usr/bin/otool
 require_command /usr/bin/plutil
 require_command /usr/bin/security
+require_command /usr/bin/shasum
 require_command /usr/bin/xcrun
 require_command /usr/libexec/PlistBuddy
 

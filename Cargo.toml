@@ -1,6 +1,6 @@
 [package]
 name = "sosus"
-version = "0.1.0"
+version = "2026.8.22-beta.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"

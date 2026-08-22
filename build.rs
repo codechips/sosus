@@ -1,11 +1,25 @@
-use std::{env, path::PathBuf, process::Command};
+use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
-    let plist = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"))
-        .join("packaging/macos/Info.plist");
+    let manifest_directory =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
+    let plist_template = manifest_directory.join("packaging/macos/Info.plist");
 
-    println!("cargo:rerun-if-changed={}", plist.display());
+    println!("cargo:rerun-if-changed={}", plist_template.display());
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let version = env::var("CARGO_PKG_VERSION").expect("package version");
+        let version_core = version
+            .split_once('-')
+            .map_or(version.as_str(), |(core, _)| core);
+        let plist = env::var_os("OUT_DIR")
+            .map(PathBuf::from)
+            .expect("build output directory")
+            .join("Info.plist");
+        let template = fs::read_to_string(&plist_template).expect("read Info.plist template");
+        let plist_contents = template
+            .replace("{{SOSUS_VERSION_CORE}}", version_core)
+            .replace("{{SOSUS_VERSION}}", &version);
+        fs::write(&plist, plist_contents).expect("write generated Info.plist");
         println!(
             "cargo:rustc-link-arg-bin=sosus=-Wl,-sectcreate,__TEXT,__info_plist,{}",
             plist.display()

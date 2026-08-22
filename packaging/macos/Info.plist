@@ -4,8 +4,14 @@
 <dict>
     <key>CFBundleIdentifier</key>
     <string>dev.sosus.cli</string>
-    <key>CFBundleName</key>
-    <string>sosus</string>
+	<key>CFBundleName</key>
+	<string>sosus</string>
+	<key>CFBundleShortVersionString</key>
+	<string>{{SOSUS_VERSION_CORE}}</string>
+	<key>CFBundleVersion</key>
+	<string>{{SOSUS_VERSION_CORE}}</string>
+	<key>CFBundleGetInfoString</key>
+	<string>sosus {{SOSUS_VERSION}}</string>
     <key>NSAudioCaptureUsageDescription</key>
     <string>sosus records system audio so it can transcribe your meetings on this Mac.</string>
     <key>NSMicrophoneUsageDescription</key>
