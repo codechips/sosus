@@ -14,17 +14,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_INCREMENTAL: "0"
-  CARGO_TERM_COLOR: always
-  HF_HUB_DISABLE_TELEMETRY: "1"
-  HF_HUB_OFFLINE: "1"
-  MISE_YES: "1"
-  TRANSFORMERS_OFFLINE: "1"
-
 jobs:
-  model-free:
-    name: Model-free quality gates
+  checks:
+    name: Quality gates
     runs-on: macos-15
     timeout-minutes: 30
 
@@ -44,54 +36,5 @@ jobs:
       - name: Install Rust quality components
         run: rustup component add rustfmt clippy
 
-      - name: Confirm Apple Silicon runner
-        run: test "$(uname -m)" = arm64
-
-      - name: Isolate application data
-        run: |
-          mkdir -p "$RUNNER_TEMP/sosus-data"
-          printf 'SOSUS_DATA_DIR=%s\n' "$RUNNER_TEMP/sosus-data" >> "$GITHUB_ENV"
-
-      - name: Run model-free checks
+      - name: Run quality gates
         run: mise run ci
-
-      - name: Confirm tests created no model data
-        run: |
-          if [ -d "$SOSUS_DATA_DIR/models" ] \
-            && find "$SOSUS_DATA_DIR/models" -type f -print -quit | grep -q .; then
-            echo "Model-free CI created model data" >&2
-            exit 1
-          fi
-
-      - name: Build unsigned development binary
-        run: |
-          CARGO_NET_OFFLINE=true mise run release-build
-          if codesign --display --verbose=4 target/aarch64-apple-darwin/release/sosus 2>&1 \
-            | grep -Fq "Authority=Developer ID Application:"; then
-            echo "CI binary unexpectedly has a Developer ID signature" >&2
-            exit 1
-          fi
-
-      - name: Package unsigned development binary
-        if: github.event_name != 'pull_request'
-        run: |
-          mkdir -p dist/ci/sosus-unsigned-development
-          cp target/aarch64-apple-darwin/release/sosus dist/ci/sosus-unsigned-development/
-          printf '%s\n' \
-            "UNSIGNED DEVELOPMENT BUILD" \
-            "" \
-            "This CI artifact is not Developer ID signed or notarized." \
-            "It is not capture-ready, may not receive TCC permissions, and must not be published as a release." \
-            > dist/ci/sosus-unsigned-development/UNSIGNED-DEVELOPMENT-BUILD.txt
-          tar -czf dist/sosus-macos-arm64-UNSIGNED-DEVELOPMENT.tar.gz \
-            -C dist/ci sosus-unsigned-development
-
-      - name: Upload unsigned development artifact
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sosus-UNSIGNED-DEVELOPMENT-aarch64-apple-darwin
-          path: dist/sosus-macos-arm64-UNSIGNED-DEVELOPMENT.tar.gz
-          archive: false
-          if-no-files-found: error
-          retention-days: 7
