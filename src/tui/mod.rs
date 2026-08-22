@@ -90,6 +90,7 @@ struct App {
     show_help: bool,
     show_settings: bool,
     confirm_quit_processing: bool,
+    delete_confirmation: Option<Meeting>,
     should_quit: bool,
     message: Option<String>,
     warnings: VecDeque<String>,
@@ -115,6 +116,7 @@ impl App {
             show_help: false,
             show_settings: false,
             confirm_quit_processing: false,
+            delete_confirmation: None,
             should_quit: false,
             message: None,
             warnings: startup.warnings.into(),
@@ -165,6 +167,24 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppAction> {
+        if self.delete_confirmation.is_some() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Enter, _) => {
+                    let path = self
+                        .delete_confirmation
+                        .take()
+                        .expect("delete confirmation should contain a meeting")
+                        .path;
+                    return Some(AppAction::TrashMeetingFolder(path));
+                }
+                (KeyCode::Esc, _) | (KeyCode::Char('d'), _) => {
+                    self.delete_confirmation = None;
+                }
+                _ => {}
+            }
+            return None;
+        }
+
         if self.confirm_quit_processing {
             match (key.code, key.modifiers) {
                 (KeyCode::Enter, _) => self.should_quit = true,
@@ -230,9 +250,22 @@ impl App {
                 self.should_quit = true;
             }
             (KeyCode::Char('r'), _) => return Some(AppAction::ToggleRecording),
+            (KeyCode::Char('t'), _) if self.recording.is_none() && !self.pipeline_active => {
+                if let Some(meeting) = self.meetings.get(self.selected_meeting) {
+                    return Some(AppAction::TranscribeMeeting(meeting.path.clone()));
+                }
+            }
             (KeyCode::Char('o'), _) => {
                 if let Some(meeting) = self.meetings.get(self.selected_meeting) {
                     return Some(AppAction::OpenMeetingFolder(meeting.path.clone()));
+                }
+            }
+            (KeyCode::Char('d'), _) => {
+                self.delete_confirmation = self.meetings.get(self.selected_meeting).cloned();
+            }
+            (KeyCode::Char('D'), _) => {
+                if let Some(meeting) = self.meetings.get(self.selected_meeting) {
+                    return Some(AppAction::TrashMeetingFolder(meeting.path.clone()));
                 }
             }
             (KeyCode::Char('?'), _) => self.show_help = !self.show_help,
@@ -398,6 +431,8 @@ impl App {
             render_settings_preview(frame, centered_rect(64, 50, area));
         } else if self.confirm_quit_processing {
             render_quit_processing_confirmation(frame, centered_rect(54, 28, area));
+        } else if let Some(meeting) = &self.delete_confirmation {
+            render_delete_confirmation(frame, &meeting.name, centered_rect(54, 28, area));
         }
         render_status_bar(frame, area, self);
     }
@@ -423,7 +458,9 @@ enum AppAction {
     ToggleRecording,
     StopRecording,
     StopRecordingAndQuit,
+    TranscribeMeeting(PathBuf),
     OpenMeetingFolder(PathBuf),
+    TrashMeetingFolder(PathBuf),
 }
 
 pub async fn run(startup: Startup) -> anyhow::Result<()> {
@@ -467,7 +504,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                             Some(AppAction::ToggleRecording) if app.recording.is_some() => {
                                 match app.stop_recording() {
                                     Ok(Some(path)) => {
-                                        launch_pipeline(&app, path, &pipeline_tx)
+                                        launch_pipeline(&mut app, path, &pipeline_tx)
                                     }
                                     Ok(None) => {}
                                     Err(error) => app.error = Some(format!("{error:#}")),
@@ -481,7 +518,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                             Some(AppAction::StopRecording) => {
                                 match app.stop_recording() {
                                     Ok(Some(path)) => {
-                                        launch_pipeline(&app, path, &pipeline_tx)
+                                        launch_pipeline(&mut app, path, &pipeline_tx)
                                     }
                                     Ok(None) => {}
                                     Err(error) => app.error = Some(format!("{error:#}")),
@@ -494,9 +531,21 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                                     Err(error) => app.error = Some(format!("{error:#}")),
                                 }
                             }
+                            Some(AppAction::TranscribeMeeting(path)) => {
+                                launch_pipeline(&mut app, path, &pipeline_tx);
+                            }
                             Some(AppAction::OpenMeetingFolder(path)) => {
                                 if let Err(error) = open_meeting_folder(&path) {
                                     app.error = Some(format!("{error:#}"));
+                                }
+                            }
+                            Some(AppAction::TrashMeetingFolder(path)) => {
+                                match trash_meeting_folder(&path) {
+                                    Ok(()) => {
+                                        app.refresh_archive();
+                                        app.message = Some("Moved recording to Trash".to_owned());
+                                    }
+                                    Err(error) => app.error = Some(format!("{error:#}")),
                                 }
                             }
                             None => {}
@@ -536,17 +585,18 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
 }
 
 fn launch_pipeline(
-    app: &App,
+    app: &mut App,
     recording_path: PathBuf,
     events: &mpsc::UnboundedSender<PipelineEvent>,
 ) {
     let Some(context) = &app.recording_context else {
+        app.error = Some("Recording is not configured".to_owned());
         return;
     };
     let output_dir = context.app_paths.output_dir().to_path_buf();
+    app.handle_pipeline_event(PipelineEvent::WorkStarted);
     let events = events.clone();
     tokio::spawn(async move {
-        let _ = events.send(PipelineEvent::WorkStarted);
         let result = TokioCommand::new(std::env::current_exe().expect("current executable"))
             .args(["resume"])
             .arg(recording_path)
@@ -608,6 +658,19 @@ fn open_meeting_folder(path: &Path) -> anyhow::Result<()> {
         .arg(path)
         .spawn()
         .with_context(|| format!("could not open {} in Finder", path.display()))?;
+    Ok(())
+}
+
+fn trash_meeting_folder(path: &Path) -> anyhow::Result<()> {
+    let script = "on run argv\n  tell application \"Finder\"\n    delete POSIX file (item 1 of argv)\n  end tell\nend run";
+    let status = Command::new("osascript")
+        .args(["-e", script])
+        .arg(path)
+        .status()
+        .with_context(|| format!("could not ask Finder to trash {}", path.display()))?;
+    if !status.success() {
+        anyhow::bail!("Finder could not move {} to Trash", path.display());
+    }
     Ok(())
 }
 
@@ -784,7 +847,9 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("Tab / Shift+Tab  Move focus"),
         Line::from("F2               Settings preview"),
         Line::from("r                Start / stop recording"),
+        Line::from("t                Transcribe selected recording"),
         Line::from("o                Open selected recording in Finder"),
+        Line::from("d / D            Delete with confirmation / immediately"),
         Line::from("?                Toggle help"),
         Line::from("q                Stop recording and quit"),
         Line::from("Ctrl+C           Stop recording, otherwise quit"),
@@ -847,6 +912,30 @@ fn render_quit_processing_confirmation(frame: &mut Frame<'_>, area: Rect) {
         .style(theme::overlay());
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(content).block(block), area);
+}
+
+fn render_delete_confirmation(frame: &mut Frame<'_>, meeting_name: &str, area: Rect) {
+    let content = Text::from(vec![
+        Line::styled("Move this recording to Trash?", theme::warning_text()),
+        Line::from(""),
+        Line::styled(meeting_name, theme::primary_text()),
+        Line::from(""),
+        Line::styled(
+            "Enter to delete · Esc or d to cancel",
+            theme::secondary_text(),
+        ),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Delete recording")
+        .style(theme::overlay());
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(block)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -975,6 +1064,63 @@ mod tests {
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
             Some(AppAction::OpenMeetingFolder(PathBuf::from("/tmp/meeting")))
+        );
+    }
+
+    #[test]
+    fn transcribe_key_requests_the_selected_meeting_when_idle() {
+        let mut app = app();
+        app.meetings = vec![Meeting {
+            path: PathBuf::from("/tmp/meeting"),
+            name: "meeting".to_owned(),
+            duration_seconds: None,
+            transcript: Vec::new(),
+        }];
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
+            Some(AppAction::TranscribeMeeting(PathBuf::from("/tmp/meeting")))
+        );
+
+        app.pipeline_active = true;
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
+            None
+        );
+    }
+
+    #[test]
+    fn delete_key_confirms_but_uppercase_deletes_immediately() {
+        let meeting = Meeting {
+            path: PathBuf::from("/tmp/meeting"),
+            name: "meeting".to_owned(),
+            duration_seconds: None,
+            transcript: Vec::new(),
+        };
+        let mut confirmed = app();
+        confirmed.meetings = vec![meeting.clone()];
+
+        assert_eq!(
+            confirmed.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            confirmed
+                .delete_confirmation
+                .as_ref()
+                .map(|item| &item.path),
+            Some(&meeting.path)
+        );
+        assert_eq!(
+            confirmed.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppAction::TrashMeetingFolder(meeting.path.clone()))
+        );
+
+        let mut immediate = app();
+        immediate.meetings = vec![meeting.clone()];
+        assert_eq!(
+            immediate.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT)),
+            Some(AppAction::TrashMeetingFolder(meeting.path))
         );
     }
 
