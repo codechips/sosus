@@ -286,8 +286,8 @@ impl App {
             .context("recording is not configured")?;
         audio::ensure_capture_permissions().await?;
         let started_at = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-        let meeting_dir = context.app_paths.create_meeting_dir(started_at)?;
-        let session = audio::RecordingSession::start(meeting_dir.join("recording.wav"))?;
+        let (meeting_dir, session) =
+            audio::RecordingSession::start_new_meeting(&context.app_paths, started_at)?;
         self.recording = Some(ActiveRecording {
             session,
             meeting_dir,

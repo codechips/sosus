@@ -1,14 +1,22 @@
 //! Core system-plus-microphone recording coordinator.
 
-use std::{collections::VecDeque, path::Path, time::Instant};
+use std::{
+    collections::VecDeque,
+    fs,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
+use anyhow::Context;
 use thiserror::Error;
+use time::OffsetDateTime;
 
 use super::{
     mic::{MicrophoneCapture, MicrophoneCaptureError, MicrophoneReader},
     tap::{SystemAudioCapture, SystemAudioCaptureError, SystemAudioReader},
     wav::{RECORDING_SAMPLE_RATE, RecordingWavError, RecordingWavSink},
 };
+use crate::paths::AppPaths;
 
 const SOURCE_BUFFER_FRAMES: usize = 8_192;
 const DEFAULT_GAIN: f32 = 0.707_945_76; // -3 dB
@@ -38,6 +46,31 @@ pub struct RecordingSession {
 }
 
 impl RecordingSession {
+    /// Reserve a meeting folder and start recording, removing the reservation if capture cannot
+    /// be initialized. This prevents failed starts from appearing as empty recordings.
+    pub fn start_new_meeting(
+        app_paths: &AppPaths,
+        started_at: OffsetDateTime,
+    ) -> anyhow::Result<(PathBuf, Self)> {
+        let meeting_dir = app_paths.create_meeting_dir(started_at)?;
+        let recording_path = meeting_dir.join("recording.wav");
+        match Self::start(&recording_path) {
+            Ok(session) => Ok((meeting_dir, session)),
+            Err(error) => {
+                if let Err(cleanup_error) = remove_failed_meeting_dir(&meeting_dir) {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "could not initialize recording; failed to remove {}: {cleanup_error}",
+                            meeting_dir.display()
+                        )
+                    });
+                }
+                Err(error)
+                    .context("could not initialize recording; removed the empty meeting folder")
+            }
+        }
+    }
+
     /// Start both required sources and create a new canonical WAV sink.
     pub fn start(path: impl AsRef<Path>) -> Result<Self, RecordingError> {
         let (system_capture, system_reader) = SystemAudioCapture::start_default()?;
@@ -187,6 +220,10 @@ impl RecordingSession {
     }
 }
 
+fn remove_failed_meeting_dir(path: &Path) -> std::io::Result<()> {
+    fs::remove_dir_all(path)
+}
+
 fn peak(samples: &[f32]) -> f32 {
     samples
         .iter()
@@ -297,7 +334,24 @@ pub enum RecordingError {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, fs};
+
     use super::*;
+
+    #[test]
+    fn failed_start_cleanup_removes_the_entire_meeting_reservation() {
+        let path = env::temp_dir().join(format!(
+            "sosus-failed-recording-{}-{}",
+            std::process::id(),
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("recording.wav"), b"partial recording").unwrap();
+
+        remove_failed_meeting_dir(&path).unwrap();
+
+        assert!(!path.exists());
+    }
 
     #[test]
     fn rate_conversion_has_exact_long_term_length() {

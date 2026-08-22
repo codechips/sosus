@@ -25,6 +25,7 @@ pub fn discover(root: &Path) -> io::Result<Vec<Meeting>> {
     let mut meetings = fs::read_dir(root)?
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| entry.path().join("recording.wav").is_file())
         .filter_map(|entry| load_meeting(entry.path()).ok())
         .collect::<Vec<_>>();
     meetings.sort_by(|left, right| right.name.cmp(&left.name));
@@ -113,7 +114,40 @@ fn parse_timestamp(value: &str) -> io::Result<f64> {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, fs};
+
     use super::*;
+
+    #[test]
+    fn ignores_incomplete_meeting_folders() {
+        let root = env::temp_dir().join(format!(
+            "sosus-archive-test-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("incomplete")).unwrap();
+        let complete = root.join("complete");
+        fs::create_dir(&complete).unwrap();
+        hound::WavWriter::create(
+            complete.join("recording.wav"),
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap()
+        .finalize()
+        .unwrap();
+
+        let meetings = discover(&root).unwrap();
+
+        assert_eq!(meetings.len(), 1);
+        assert_eq!(meetings[0].name, "complete");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parses_exported_transcript_segments() {

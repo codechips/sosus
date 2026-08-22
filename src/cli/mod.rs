@@ -503,9 +503,8 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
         .context("recording permissions are required")?;
 
     let started_at = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-    let meeting_dir = app_paths.create_meeting_dir(started_at)?;
-    let recording_path = meeting_dir.join("recording.wav");
-    let mut session = audio::RecordingSession::start(&recording_path)?;
+    let (meeting_dir, mut session) =
+        audio::RecordingSession::start_new_meeting(&app_paths, started_at)?;
     let formats = session.source_formats();
     tracing::info!(
         event = "recording_started",
