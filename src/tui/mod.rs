@@ -10,7 +10,7 @@ use std::{
     io::{self, Stdout},
     panic,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -781,7 +781,10 @@ fn trash_meeting_folder(path: &Path) -> anyhow::Result<()> {
 fn finder_trash_command(path: &Path) -> Command {
     let script = "on run argv\n  set targetItem to POSIX file (item 1 of argv) as alias\n  tell application \"Finder\" to delete targetItem\nend run";
     let mut command = Command::new("osascript");
-    command.args(["-e", script, "--"]).arg(path);
+    command
+        .args(["-e", script, "--"])
+        .arg(path)
+        .stdout(Stdio::null());
     command
 }
 
