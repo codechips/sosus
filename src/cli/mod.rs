@@ -65,6 +65,11 @@ enum Command {
         #[arg(long, value_name = "N")]
         max_speakers: Option<usize>,
     },
+    /// Import one existing audio or video file into the meeting archive.
+    Import {
+        /// Audio or video file to import.
+        file: PathBuf,
+    },
     /// Recover interrupted work and resume processing a saved meeting.
     Resume {
         /// Database meeting id to resume.
@@ -98,11 +103,29 @@ pub async fn run() -> anyhow::Result<()> {
                     min_speakers,
                     max_speakers,
                     existing_meeting: None,
+                    source: "file",
                 },
             )
             .await
         }
         Some(Command::Resume { meeting }) => run_resume(&cli, meeting).await,
+        Some(Command::Import { ref file }) => {
+            run_transcribe(
+                &cli,
+                TranscribeInvocation {
+                    file,
+                    backend: None,
+                    language: None,
+                    threads: None,
+                    no_diarize: false,
+                    min_speakers: None,
+                    max_speakers: None,
+                    existing_meeting: None,
+                    source: "import",
+                },
+            )
+            .await
+        }
         None if io::stdin().is_terminal() && io::stdout().is_terminal() => run_tui(&cli).await,
         None => print_help(),
     }
@@ -178,6 +201,7 @@ async fn run_resume(cli: &Cli, meeting_id: i64) -> anyhow::Result<()> {
             min_speakers: None,
             max_speakers: None,
             existing_meeting: Some(meeting_id),
+            source: "file",
         },
     )
     .await
@@ -192,6 +216,7 @@ struct TranscribeInvocation<'a> {
     min_speakers: Option<usize>,
     max_speakers: Option<usize>,
     existing_meeting: Option<i64>,
+    source: &'a str,
 }
 
 async fn run_transcribe(
@@ -207,6 +232,7 @@ async fn run_transcribe(
         min_speakers,
         max_speakers,
         existing_meeting,
+        source,
     } = invocation_args;
     let invocation = config::ConfigOverrides {
         config_path: cli.config.clone(),
@@ -270,7 +296,7 @@ async fn run_transcribe(
                 language: effective.effective.transcription.language.clone(),
                 audio_path: Some(file.to_string_lossy().into_owned()),
                 audio_owned: false,
-                source: "file".to_owned(),
+                source: source.to_owned(),
                 speaker_count: 0,
                 created_at: started_text.clone(),
             }))? {
@@ -677,6 +703,7 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
             min_speakers: None,
             max_speakers: None,
             existing_meeting: Some(meeting_id),
+            source: "recording",
         },
     )
     .await
