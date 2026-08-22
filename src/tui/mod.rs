@@ -37,6 +37,7 @@ use crate::pipeline::{self, AppEvent as PipelineEvent};
 
 const MINIMUM_WIDTH: u16 = 80;
 const MINIMUM_HEIGHT: u16 = 24;
+static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Focus {
@@ -280,6 +281,7 @@ impl TerminalGuard {
             let _ = restore_terminal();
             return Err(error);
         }
+        TERMINAL_ACTIVE.store(true, Ordering::Release);
         Ok((Self { active: true }, terminal))
     }
 
@@ -289,7 +291,7 @@ impl TerminalGuard {
         }
 
         let cursor_result = terminal.show_cursor();
-        let restore_result = restore_terminal();
+        let restore_result = restore_active_terminal();
         let result = cursor_result.and(restore_result);
         if result.is_ok() {
             self.active = false;
@@ -301,9 +303,21 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         if self.active {
-            let _ = restore_terminal();
+            let _ = restore_active_terminal();
         }
     }
+}
+
+fn restore_active_terminal() -> io::Result<()> {
+    if !TERMINAL_ACTIVE.swap(false, Ordering::AcqRel) {
+        return Ok(());
+    }
+
+    let result = restore_terminal();
+    if result.is_err() {
+        TERMINAL_ACTIVE.store(true, Ordering::Release);
+    }
+    result
 }
 
 fn restore_terminal() -> io::Result<()> {
@@ -316,7 +330,7 @@ fn restore_terminal() -> io::Result<()> {
 fn install_panic_hook() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        let _ = restore_terminal();
+        let _ = restore_active_terminal();
         previous(info);
     }));
 }
