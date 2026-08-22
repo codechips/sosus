@@ -7,18 +7,45 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+use crate::db::Meeting;
 use crate::tui::theme;
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, focused: bool, archive_dir: &str) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focused: bool,
+    archive_dir: &str,
+    meetings: &[Meeting],
+    selected: usize,
+) {
     let title = if focused { "▶ Meetings" } else { "Meetings" };
-    let body = Text::from(vec![
-        Line::styled("No meetings yet", theme::primary_text()),
-        Line::styled(
-            "Recordings will appear newest first.",
-            theme::secondary_text(),
-        ),
-        Line::styled(archive_dir, theme::secondary_text()),
-    ]);
+    let mut lines = if meetings.is_empty() {
+        vec![
+            Line::styled("No meetings yet", theme::primary_text()),
+            Line::styled(
+                "Recordings will appear newest first.",
+                theme::secondary_text(),
+            ),
+        ]
+    } else {
+        meetings
+            .iter()
+            .enumerate()
+            .map(|(index, meeting)| {
+                let marker = if index == selected { "▶ " } else { "  " };
+                Line::styled(
+                    format!("{marker}#{}  {:.1}s", meeting.id, meeting.duration_s),
+                    if index == selected {
+                        theme::primary_text()
+                    } else {
+                        theme::secondary_text()
+                    },
+                )
+            })
+            .collect()
+    };
+    lines.push(Line::styled(archive_dir, theme::secondary_text()));
+    let body = Text::from(lines);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)

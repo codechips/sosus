@@ -6,7 +6,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::asr::TranscriptResult;
 
-use super::models::{Meeting, NewMeeting, NewPassage, Passage, PipelineStage, PipelineStageUpdate};
+use super::models::{
+    Meeting, NewMeeting, NewPassage, Passage, PipelineStage, PipelineStageUpdate, Segment, Summary,
+};
 
 const CONNECTION_PRAGMAS: &str = "
 PRAGMA foreign_keys = ON;
@@ -410,6 +412,72 @@ pub(super) fn meeting(connection: &Connection, id: i64) -> rusqlite::Result<Opti
             })
         })
         .optional()
+}
+
+pub(super) fn meetings(connection: &Connection, limit: usize) -> rusqlite::Result<Vec<Meeting>> {
+    let mut statement = connection.prepare(
+        "SELECT id, started_at, ended_at, title, duration_s, language, audio_path,
+                audio_owned, source, speaker_count, created_at
+         FROM meetings ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = statement.query_map([limit as i64], |row| {
+        Ok(Meeting {
+            id: row.get(0)?,
+            started_at: row.get(1)?,
+            ended_at: row.get(2)?,
+            title: row.get(3)?,
+            duration_s: row.get(4)?,
+            language: row.get(5)?,
+            audio_path: row.get(6)?,
+            audio_owned: row.get::<_, i64>(7)? == 1,
+            source: row.get(8)?,
+            speaker_count: row.get(9)?,
+            created_at: row.get(10)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub(super) fn latest_summary(
+    connection: &Connection,
+    meeting_id: i64,
+) -> rusqlite::Result<Option<Summary>> {
+    connection
+        .query_row(
+            "SELECT id, meeting_id, template, body, model, created_at
+             FROM summaries WHERE meeting_id = ?1 ORDER BY id DESC LIMIT 1",
+            [meeting_id],
+            |row| {
+                Ok(Summary {
+                    id: row.get(0)?,
+                    meeting_id: row.get(1)?,
+                    template: row.get(2)?,
+                    body: row.get(3)?,
+                    model: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+}
+
+pub(super) fn segments(connection: &Connection, meeting_id: i64) -> rusqlite::Result<Vec<Segment>> {
+    let mut statement = connection.prepare(
+        "SELECT id, meeting_id, idx, start_s, end_s, speaker, text
+         FROM segments WHERE meeting_id = ?1 ORDER BY idx",
+    )?;
+    let rows = statement.query_map([meeting_id], |row| {
+        Ok(Segment {
+            id: row.get(0)?,
+            meeting_id: row.get(1)?,
+            idx: row.get(2)?,
+            start_s: row.get(3)?,
+            end_s: row.get(4)?,
+            speaker: row.get(5)?,
+            text: row.get(6)?,
+        })
+    })?;
+    rows.collect()
 }
 
 const INSERT_PASSAGE: &str = "

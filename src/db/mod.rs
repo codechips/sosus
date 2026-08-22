@@ -134,6 +134,18 @@ impl DatabaseReader {
         Ok(queries::meeting(&self.connection, id)?)
     }
 
+    pub fn meetings(&self, limit: usize) -> Result<Vec<Meeting>, DatabaseError> {
+        Ok(queries::meetings(&self.connection, limit)?)
+    }
+
+    pub fn latest_summary(&self, meeting_id: i64) -> Result<Option<Summary>, DatabaseError> {
+        Ok(queries::latest_summary(&self.connection, meeting_id)?)
+    }
+
+    pub fn segments(&self, meeting_id: i64) -> Result<Vec<Segment>, DatabaseError> {
+        Ok(queries::segments(&self.connection, meeting_id)?)
+    }
+
     #[allow(dead_code)]
     pub fn passage(&self, id: i64) -> Result<Option<Passage>, DatabaseError> {
         Ok(queries::passage(&self.connection, id)?)

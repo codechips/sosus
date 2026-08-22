@@ -39,7 +39,10 @@ use tokio::sync::mpsc;
 
 use crate::{
     audio,
-    db::{DatabaseWriter, NewMeeting, WriteCommand, WriteResult},
+    db::{
+        DatabaseReader, DatabaseWriter, Meeting, NewMeeting, Segment, Summary, WriteCommand,
+        WriteResult,
+    },
     paths::AppPaths,
     pipeline::{self, AppEvent as PipelineEvent},
 };
@@ -100,6 +103,11 @@ struct App {
     recording: Option<ActiveRecording>,
     last_recording: Option<String>,
     pipeline_status: Option<String>,
+    database_reader: Option<DatabaseReader>,
+    meetings: Vec<Meeting>,
+    selected_meeting: usize,
+    summary: Option<Summary>,
+    transcript: Vec<Segment>,
 }
 
 impl App {
@@ -117,6 +125,30 @@ impl App {
             recording: None,
             last_recording: None,
             pipeline_status: None,
+            database_reader: startup.database_reader,
+            meetings: Vec::new(),
+            selected_meeting: 0,
+            summary: None,
+            transcript: Vec::new(),
+        }
+    }
+
+    fn refresh_archive(&mut self) {
+        let Some(reader) = &self.database_reader else {
+            return;
+        };
+        if let Ok(meetings) = reader.meetings(20) {
+            self.meetings = meetings;
+            self.selected_meeting = self
+                .selected_meeting
+                .min(self.meetings.len().saturating_sub(1));
+            if let Some(meeting) = self.meetings.get(self.selected_meeting) {
+                self.summary = reader.latest_summary(meeting.id).ok().flatten();
+                self.transcript = reader.segments(meeting.id).unwrap_or_default();
+            } else {
+                self.summary = None;
+                self.transcript.clear();
+            }
         }
     }
 
@@ -244,8 +276,11 @@ impl App {
     }
 
     fn handle_pipeline_event(&mut self, event: PipelineEvent) {
+        let completed = matches!(event, PipelineEvent::WorkCompleted);
         match event {
-            PipelineEvent::WorkStarted => self.pipeline_status = Some("Starting pipeline".to_owned()),
+            PipelineEvent::WorkStarted => {
+                self.pipeline_status = Some("Starting pipeline".to_owned())
+            }
             PipelineEvent::Stage(stage) => self.pipeline_status = Some(stage),
             PipelineEvent::WorkProgress { completed, total } => {
                 self.pipeline_status = Some(format!("Running {completed}/{total}"));
@@ -256,6 +291,9 @@ impl App {
                 self.pipeline_status = Some(format!("Failed: {error}"));
             }
             PipelineEvent::WorkerStopped => {}
+        }
+        if completed {
+            self.refresh_archive();
         }
     }
 
@@ -288,8 +326,16 @@ impl App {
             columns[0],
             self.focus == Focus::Meetings,
             &self.archive_dir,
+            &self.meetings,
+            self.selected_meeting,
         );
-        panes::transcript::render(frame, columns[1], self.focus == Focus::Transcript);
+        panes::transcript::render(
+            frame,
+            columns[1],
+            self.focus == Focus::Transcript,
+            self.summary.as_ref(),
+            &self.transcript,
+        );
         panes::chat::render(frame, right[0], self.focus == Focus::Chat);
         panes::recording::render(
             frame,
@@ -325,6 +371,7 @@ pub struct Startup {
     pub archive_dir: String,
     pub warnings: Vec<String>,
     pub recording: Option<RecordingStartup>,
+    pub database_reader: Option<DatabaseReader>,
 }
 
 pub struct RecordingStartup {
@@ -357,6 +404,7 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
 
 async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Result<()> {
     let mut app = App::new(startup);
+    app.refresh_archive();
     let mut input = InputThread::spawn().context("start terminal input reader")?;
     let mut pipeline = pipeline::Worker::spawn().context("start pipeline worker")?;
     let (pipeline_tx, mut pipeline_rx) = mpsc::unbounded_channel();
@@ -756,6 +804,7 @@ mod tests {
             archive_dir: "/tmp/sosus-test-recordings".to_owned(),
             warnings: Vec::new(),
             recording: None,
+            database_reader: None,
         })
     }
 
@@ -797,6 +846,7 @@ mod tests {
             archive_dir: "/tmp/sosus-test-recordings".to_owned(),
             warnings: vec!["first".to_owned(), "second".to_owned()],
             recording: None,
+            database_reader: None,
         });
         assert_eq!(app.warnings.front().map(String::as_str), Some("first"));
 

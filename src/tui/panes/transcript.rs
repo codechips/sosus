@@ -7,24 +7,42 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+use crate::db::{Segment, Summary};
 use crate::tui::theme;
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, focused: bool) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focused: bool,
+    summary: Option<&Summary>,
+    segments: &[Segment],
+) {
     let title = if focused {
         "▶ Transcript"
     } else {
         "Transcript"
     };
-    let body = Text::from(vec![
-        Line::styled(
+    let mut lines = Vec::new();
+    if let Some(summary) = summary {
+        lines.push(Line::styled(summary.body.clone(), theme::primary_text()));
+    }
+    if !segments.is_empty() {
+        lines.push(Line::styled("Transcript", theme::secondary_text()));
+        for segment in segments.iter().take(12) {
+            let speaker = segment.speaker.as_deref().unwrap_or("Unknown");
+            lines.push(Line::styled(
+                format!("{speaker}: {}", segment.text),
+                theme::primary_text(),
+            ));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(
             "Select a meeting to read its transcript.",
             theme::primary_text(),
-        ),
-        Line::styled(
-            "Speaker labels and timestamps will appear here.",
-            theme::secondary_text(),
-        ),
-    ]);
+        ));
+    }
+    let body = Text::from(lines);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
