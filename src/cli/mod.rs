@@ -539,14 +539,23 @@ fn build_summary(result: &asr::TranscriptResult) -> (String, String) {
     let body = if result.segments.is_empty() {
         "No speech was detected.".to_owned()
     } else {
-        let mut body = format!(
-            "## Transcript overview\n\n- {} segment(s)\n",
-            result.segments.len()
-        );
-        for segment in result.segments.iter().take(5) {
-            body.push_str(&format!("- {}\n", segment.text));
-        }
-        body
+        let speaker_count = result
+            .segments
+            .iter()
+            .filter_map(|segment| segment.speaker.as_deref())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        format!(
+            "## Overview\n\n- Duration: {:.1}s\n- Segments: {}\n- Speakers: {}\n- Language: {}\n\nSemantic meeting notes are not generated yet.",
+            result.duration_seconds,
+            result.segments.len(),
+            speaker_count,
+            if result.language.is_empty() {
+                "unknown"
+            } else {
+                &result.language
+            },
+        )
     };
     (title, body)
 }
@@ -901,6 +910,7 @@ mod tests {
         };
         let (title, body) = build_summary(&transcript);
         assert_eq!(title, "one two three four five six seven eight…");
-        assert!(body.contains("1 segment(s)"));
+        assert!(body.contains("Segments: 1"));
+        assert!(!body.contains("one two three four"));
     }
 }
