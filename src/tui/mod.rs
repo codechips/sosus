@@ -108,6 +108,7 @@ struct App {
     selected_meeting: usize,
     summary: Option<Summary>,
     transcript: Vec<Segment>,
+    transcript_scroll: u16,
 }
 
 impl App {
@@ -130,6 +131,7 @@ impl App {
             selected_meeting: 0,
             summary: None,
             transcript: Vec::new(),
+            transcript_scroll: 0,
         }
     }
 
@@ -145,9 +147,11 @@ impl App {
             if let Some(meeting) = self.meetings.get(self.selected_meeting) {
                 self.summary = reader.latest_summary(meeting.id).ok().flatten();
                 self.transcript = reader.segments(meeting.id).unwrap_or_default();
+                self.transcript_scroll = 0;
             } else {
                 self.summary = None;
                 self.transcript.clear();
+                self.transcript_scroll = 0;
             }
         }
     }
@@ -166,6 +170,7 @@ impl App {
             if let Some(meeting) = self.meetings.get(self.selected_meeting) {
                 self.summary = reader.latest_summary(meeting.id).ok().flatten();
                 self.transcript = reader.segments(meeting.id).unwrap_or_default();
+                self.transcript_scroll = 0;
             }
         }
     }
@@ -203,6 +208,12 @@ impl App {
             }
             (KeyCode::Down | KeyCode::Char('j'), _) if self.focus == Focus::Meetings => {
                 self.move_selection(1);
+            }
+            (KeyCode::Up | KeyCode::Char('k'), _) if self.focus == Focus::Transcript => {
+                self.transcript_scroll = self.transcript_scroll.saturating_sub(1);
+            }
+            (KeyCode::Down | KeyCode::Char('j'), _) if self.focus == Focus::Transcript => {
+                self.transcript_scroll = self.transcript_scroll.saturating_add(1);
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) if self.recording.is_some() => {
                 return Some(AppAction::StopRecording);
@@ -331,17 +342,17 @@ impl App {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(45),
-                Constraint::Percentage(30),
+                Constraint::Percentage(22),
+                Constraint::Percentage(58),
+                Constraint::Percentage(20),
             ])
             .split(area);
         let right = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(55),
+                Constraint::Percentage(50),
                 Constraint::Percentage(30),
-                Constraint::Percentage(15),
+                Constraint::Percentage(20),
             ])
             .split(columns[2]);
 
@@ -359,6 +370,7 @@ impl App {
             self.focus == Focus::Transcript,
             self.summary.as_ref(),
             &self.transcript,
+            self.transcript_scroll,
         );
         panes::chat::render(frame, right[0], self.focus == Focus::Chat);
         panes::recording::render(
@@ -956,7 +968,7 @@ mod tests {
             "Recording",
             "No meetings yet",
             "Select a meeting",
-            "Archive scope",
+            "Not",
             "READY",
         ] {
             assert!(rendered.contains(content), "missing content: {content}");

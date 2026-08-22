@@ -16,6 +16,7 @@ pub fn render(
     focused: bool,
     summary: Option<&Summary>,
     segments: &[Segment],
+    scroll: u16,
 ) {
     let title = if focused {
         "▶ Transcript"
@@ -62,7 +63,10 @@ pub fn render(
         .title_style(theme::pane_title(focused));
 
     frame.render_widget(
-        Paragraph::new(body).block(block).wrap(Wrap { trim: true }),
+        Paragraph::new(body)
+            .block(block)
+            .wrap(Wrap { trim: true })
+            .scroll((scroll, 0)),
         area,
     );
 }
