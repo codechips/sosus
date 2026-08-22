@@ -33,6 +33,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -185,9 +186,9 @@ impl App {
         Ok(())
     }
 
-    fn stop_recording(&mut self) -> anyhow::Result<()> {
+    fn stop_recording(&mut self) -> anyhow::Result<Option<(PathBuf, i64)>> {
         let Some(active) = self.recording.take() else {
-            return Ok(());
+            return Ok(None);
         };
         let context = self
             .recording_context
@@ -231,7 +232,7 @@ impl App {
                 "Saved meeting {meeting_id}; microphone stream was lost"
             ));
         }
-        Ok(())
+        Ok(Some((outcome.path, meeting_id)))
     }
 
     fn pump_recording(&mut self) -> anyhow::Result<()> {
@@ -249,6 +250,9 @@ impl App {
             }
             PipelineEvent::WorkCompleted => self.pipeline_status = None,
             PipelineEvent::WorkCancelled => self.pipeline_status = Some("Cancelled".to_owned()),
+            PipelineEvent::WorkFailed(error) => {
+                self.pipeline_status = Some(format!("Failed: {error}"));
+            }
             PipelineEvent::WorkerStopped => {}
         }
     }
@@ -353,6 +357,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
     let mut app = App::new(startup);
     let mut input = InputThread::spawn().context("start terminal input reader")?;
     let mut pipeline = pipeline::Worker::spawn().context("start pipeline worker")?;
+    let (pipeline_tx, mut pipeline_rx) = mpsc::unbounded_channel();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
 
     while !app.should_quit {
@@ -373,8 +378,12 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                     Some(UiEvent::Terminal(Event::Key(key))) if key.is_press() => {
                         match app.handle_key(key) {
                             Some(AppAction::ToggleRecording) if app.recording.is_some() => {
-                                if let Err(error) = app.stop_recording() {
-                                    app.error = Some(format!("{error:#}"));
+                                match app.stop_recording() {
+                                    Ok(Some((_, meeting_id))) => {
+                                        launch_pipeline(&app, meeting_id, &pipeline_tx)
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => app.error = Some(format!("{error:#}")),
                                 }
                             }
                             Some(AppAction::ToggleRecording) => {
@@ -383,13 +392,18 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                                 }
                             }
                             Some(AppAction::StopRecording) => {
-                                if let Err(error) = app.stop_recording() {
-                                    app.error = Some(format!("{error:#}"));
+                                match app.stop_recording() {
+                                    Ok(Some((_, meeting_id))) => {
+                                        launch_pipeline(&app, meeting_id, &pipeline_tx)
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => app.error = Some(format!("{error:#}")),
                                 }
                             }
                             Some(AppAction::StopRecordingAndQuit) => {
                                 match app.stop_recording() {
-                                    Ok(()) => app.should_quit = true,
+                                    Ok(Some(_)) => app.should_quit = true,
+                                    Ok(None) => app.should_quit = true,
                                     Err(error) => app.error = Some(format!("{error:#}")),
                                 }
                             }
@@ -410,6 +424,11 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                     None => app.should_quit = true,
                 }
             }
+            maybe_event = pipeline_rx.recv() => {
+                if let Some(event) = maybe_event {
+                    app.handle_pipeline_event(event);
+                }
+            }
         }
     }
 
@@ -422,6 +441,42 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
     input.stop().context("stop terminal input reader")?;
     pipeline.shutdown().context("stop pipeline worker")?;
     Ok(())
+}
+
+fn launch_pipeline(app: &App, meeting_id: i64, events: &mpsc::UnboundedSender<PipelineEvent>) {
+    let Some(context) = &app.recording_context else {
+        return;
+    };
+    let data_dir = context.app_paths.data_dir().to_path_buf();
+    let output_dir = context.app_paths.output_dir().to_path_buf();
+    let events = events.clone();
+    tokio::spawn(async move {
+        let _ = events.send(PipelineEvent::WorkStarted);
+        let result = TokioCommand::new(std::env::current_exe().expect("current executable"))
+            .args(["resume"])
+            .arg(meeting_id.to_string())
+            .args(["--data-dir"])
+            .arg(data_dir)
+            .args(["--output-dir"])
+            .arg(output_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+        match result {
+            Ok(status) if status.success() => {
+                let _ = events.send(PipelineEvent::WorkCompleted);
+            }
+            Ok(status) => {
+                let _ = events.send(PipelineEvent::WorkFailed(format!(
+                    "pipeline exited with {status}"
+                )));
+            }
+            Err(error) => {
+                let _ = events.send(PipelineEvent::WorkFailed(error.to_string()));
+            }
+        }
+    });
 }
 
 type AppTerminal = Terminal<CrosstermBackend<Stdout>>;

@@ -273,12 +273,13 @@ pub enum Command {
     Shutdown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppEvent {
     WorkStarted,
     WorkProgress { completed: u16, total: u16 },
     WorkCompleted,
     WorkCancelled,
+    WorkFailed(String),
     WorkerStopped,
 }
 

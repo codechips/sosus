@@ -168,12 +168,13 @@ async fn run_resume(cli: &Cli, meeting_id: i64) -> anyhow::Result<()> {
         .audio_path
         .clone()
         .with_context(|| format!("meeting {meeting_id} has no source audio path"))?;
-    let incomplete = stages.iter().any(|stage| {
-        matches!(
-            stage.status.as_str(),
-            "pending" | "failed" | "cancelled" | "running"
-        )
-    });
+    let incomplete = stages.is_empty()
+        || stages.iter().any(|stage| {
+            matches!(
+                stage.status.as_str(),
+                "pending" | "failed" | "cancelled" | "running"
+            )
+        });
     drop(reader);
     database.shutdown()?;
 
