@@ -2,4 +2,4 @@
 
 mod audio_monitor;
 mod citation;
-mod progress;
+pub(crate) mod progress;

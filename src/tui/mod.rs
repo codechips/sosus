@@ -97,6 +97,7 @@ struct App {
     recording_context: Option<RecordingStartup>,
     recording: Option<ActiveRecording>,
     last_recording: Option<String>,
+    pipeline_status: Option<String>,
 }
 
 impl App {
@@ -113,6 +114,7 @@ impl App {
             recording_context: startup.recording,
             recording: None,
             last_recording: None,
+            pipeline_status: None,
         }
     }
 
@@ -240,15 +242,15 @@ impl App {
     }
 
     fn handle_pipeline_event(&mut self, event: PipelineEvent) {
-        self.message = match event {
-            PipelineEvent::WorkStarted => Some("Pipeline started".to_owned()),
+        match event {
+            PipelineEvent::WorkStarted => self.pipeline_status = Some("Running".to_owned()),
             PipelineEvent::WorkProgress { completed, total } => {
-                Some(format!("Pipeline {completed}/{total}"))
+                self.pipeline_status = Some(format!("Running {completed}/{total}"));
             }
-            PipelineEvent::WorkCompleted => Some("Pipeline completed".to_owned()),
-            PipelineEvent::WorkCancelled => Some("Pipeline cancelled".to_owned()),
-            PipelineEvent::WorkerStopped => None,
-        };
+            PipelineEvent::WorkCompleted => self.pipeline_status = None,
+            PipelineEvent::WorkCancelled => self.pipeline_status = Some("Cancelled".to_owned()),
+            PipelineEvent::WorkerStopped => {}
+        }
     }
 
     fn render(&self, frame: &mut Frame<'_>) {
@@ -268,7 +270,11 @@ impl App {
             .split(area);
         let right = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .constraints([
+                Constraint::Percentage(55),
+                Constraint::Percentage(30),
+                Constraint::Percentage(15),
+            ])
             .split(columns[2]);
 
         panes::meetings::render(
@@ -288,6 +294,7 @@ impl App {
                 .map(|active| active.session.elapsed_seconds()),
             self.last_recording.as_deref(),
         );
+        widgets::progress::render(frame, right[2], self.pipeline_status.as_deref());
 
         if let Some(error) = &self.error {
             render_notice(frame, "Error", error, centered_rect(70, 42, area));
