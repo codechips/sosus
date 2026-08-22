@@ -48,12 +48,11 @@ pub fn render(
                 input_levels.map_or(0.0, |levels| levels.1),
                 meter_width,
             ),
-            Line::styled("Spectrum", theme::secondary_text()),
         ];
         lines.extend(spectrum_lines(
             spectrum,
             area.width.saturating_sub(4) as usize,
-            6,
+            5,
         ));
         lines.extend([
             Line::styled(
@@ -103,11 +102,17 @@ fn spectrum_lines(levels: &[f32], width: usize, height: usize) -> Vec<Line<'stat
     (0..height)
         .map(|row| {
             let threshold = (height - row) as f32 / height as f32;
-            let bars = columns
-                .iter()
-                .map(|level| if *level >= threshold { '█' } else { ' ' })
-                .collect::<String>();
-            Line::from(Span::styled(bars, theme::accent_text()))
+            let mut line = Vec::with_capacity(columns.len());
+            for level in &columns {
+                if *level >= threshold {
+                    line.push(Span::styled("█", theme::accent_text()));
+                } else {
+                    // Keep a quiet baseline across the entire pane so the visualizer
+                    // reads as a deliberate full-width component even during silence.
+                    line.push(Span::styled("·", theme::secondary_text()));
+                }
+            }
+            Line::from(line)
         })
         .collect()
 }

@@ -305,7 +305,10 @@ impl App {
         let (columns, recording_area) = if self.recording.is_some() {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+                // Keep the recording controls in a compact, predictable lower pane. A
+                // fixed height also prevents the visualizer from swallowing the explorer
+                // and transcript when the terminal is tall.
+                .constraints([Constraint::Min(8), Constraint::Length(14)])
                 .split(area);
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
