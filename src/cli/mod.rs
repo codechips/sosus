@@ -11,7 +11,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::time::{Duration, MissedTickBehavior};
 
-use crate::{asr, audio, config, db, diarize, logging, models, paths};
+use crate::{asr, audio, config, db, diarize, export, logging, models, paths, pipeline};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -170,31 +170,88 @@ async fn run_transcribe(
         0 => num_cpus::get_physical().max(1),
         configured => configured,
     };
+    let database = db::Database::open(app_paths.database_file())?;
+    let started = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    let started_text = started.format(&Rfc3339)?;
+    let meeting_id =
+        match database
+            .writer()
+            .execute(db::WriteCommand::InsertMeeting(db::NewMeeting {
+                started_at: started_text.clone(),
+                ended_at: None,
+                title: None,
+                duration_s: audio.duration_seconds(),
+                language: effective.effective.transcription.language.clone(),
+                audio_path: Some(file.to_string_lossy().into_owned()),
+                audio_owned: false,
+                source: "file".to_owned(),
+                speaker_count: 0,
+                created_at: started_text.clone(),
+            }))? {
+            db::WriteResult::Inserted(id) => id,
+            other => bail!("unexpected database result while creating meeting: {other:?}"),
+        };
+    let mut skipped = vec![
+        pipeline::Stage::Summarize,
+        pipeline::Stage::Export,
+        pipeline::Stage::Index,
+    ];
+    if !effective.effective.diarization.enabled {
+        skipped.push(pipeline::Stage::Diarize);
+    }
+    let mut pipeline_state = pipeline::PipelineState::new(&skipped);
+    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
+    let input_fingerprint = file_fingerprint(file)?;
+    pipeline_state.begin(
+        pipeline::Stage::Transcribe,
+        &format!("{input_fingerprint}:{}", capabilities.id),
+        capabilities.id,
+        &started_text,
+    )?;
+    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
     let mut transcriber = asr::create_transcriber(backend);
-    transcriber
-        .prepare(&asr::PrepareOptions {
-            model_dir,
-            threads: thread_count,
-        })
-        .context("could not initialize transcription")?;
+    if let Err(error) = transcriber.prepare(&asr::PrepareOptions {
+        model_dir,
+        threads: thread_count,
+    }) {
+        pipeline_state.fail(pipeline::Stage::Transcribe, "initialization")?;
+        persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
+        let _ = database.shutdown();
+        return Err(anyhow::anyhow!(error)).context("could not initialize transcription");
+    }
     let language = (!effective.effective.transcription.language.is_empty())
         .then(|| effective.effective.transcription.language.clone());
     eprintln!("Transcribing {:.1}s of audio...", audio.duration_seconds());
-    let result = transcriber
-        .transcribe(
-            &audio,
-            &asr::TranscribeOptions {
-                language,
-                vocabulary: Vec::new(),
-                words_required: true,
-            },
-            &ConsoleAsrProgress,
-        )
-        .context("transcription failed")?;
+    let result = match transcriber.transcribe(
+        &audio,
+        &asr::TranscribeOptions {
+            language,
+            vocabulary: Vec::new(),
+            words_required: true,
+        },
+        &ConsoleAsrProgress,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            pipeline_state.fail(pipeline::Stage::Transcribe, "runtime")?;
+            persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
+            let _ = database.shutdown();
+            return Err(anyhow::anyhow!(error)).context("transcription failed");
+        }
+    };
+    pipeline_state.complete(pipeline::Stage::Transcribe, &started_text)?;
+    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
 
     let mut result = result;
     let mut speaker_count = 0_usize;
     if effective.effective.diarization.enabled {
+        pipeline_state.begin(
+            pipeline::Stage::Diarize,
+            &format!("{input_fingerprint}:diarization"),
+            "sherpa-onnx-diarization-1",
+            &started_text,
+        )?;
+        persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
         eprintln!("Preparing speaker diarization models...");
         let model_dirs = match models::ensure_diarization_model(
             "diarization-segmentation",
@@ -212,6 +269,8 @@ async fn run_transcribe(
             {
                 Ok(embedding_dir) => Some((segmentation_dir, embedding_dir)),
                 Err(error) => {
+                    pipeline_state.fail(pipeline::Stage::Diarize, "model_prepare")?;
+                    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
                     eprintln!(
                         "warning: diarization model preparation failed; transcript is undiarized: {error}"
                     );
@@ -219,6 +278,8 @@ async fn run_transcribe(
                 }
             },
             Err(error) => {
+                pipeline_state.fail(pipeline::Stage::Diarize, "model_prepare")?;
+                persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
                 eprintln!(
                     "warning: diarization model preparation failed; transcript is undiarized: {error}"
                 );
@@ -241,16 +302,22 @@ async fn run_transcribe(
                         let assignment =
                             diarize::assign_speakers(&mut result, &diarization.turns, false);
                         speaker_count = assignment.speaker_count;
+                        pipeline_state.complete(pipeline::Stage::Diarize, &started_text)?;
+                        persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
                         eprintln!(
                             "Diarization complete: {} speaker(s).",
                             assignment.speaker_count
                         );
                     }
                     Err(error) => {
+                        pipeline_state.fail(pipeline::Stage::Diarize, "runtime")?;
+                        persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
                         eprintln!("warning: diarization failed; transcript is undiarized: {error}")
                     }
                 },
                 Err(error) => {
+                    pipeline_state.fail(pipeline::Stage::Diarize, "initialization")?;
+                    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
                     eprintln!("warning: diarization failed; transcript is undiarized: {error}")
                 }
             }
@@ -265,52 +332,92 @@ async fn run_transcribe(
         }
     }
 
-    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-    let timestamp = now.format(&Rfc3339)?;
-    match db::Database::open(app_paths.database_file()) {
-        Ok(database) => {
-            let save = database
-                .writer()
-                .execute(db::WriteCommand::InsertMeeting(db::NewMeeting {
-                    started_at: timestamp.clone(),
-                    ended_at: Some(timestamp.clone()),
-                    title: None,
-                    duration_s: audio.duration_seconds(),
-                    language: result.language.clone(),
-                    audio_path: Some(file.to_string_lossy().into_owned()),
-                    audio_owned: false,
-                    source: "file".to_owned(),
-                    speaker_count: i64::try_from(speaker_count).unwrap_or(i64::MAX),
-                    created_at: timestamp,
-                }));
-            match save {
-                Ok(db::WriteResult::Inserted(meeting_id)) => {
-                    let transcript_save =
-                        database
-                            .writer()
-                            .execute(db::WriteCommand::InsertTranscript {
-                                meeting_id,
-                                transcript: result.clone(),
-                                speaker_count,
-                            });
-                    if let Err(error) = transcript_save {
-                        eprintln!("warning: transcript was not saved to the database: {error}");
-                    } else {
-                        eprintln!("Saved meeting {meeting_id} to the database.");
-                    }
-                }
-                Ok(other) => eprintln!("warning: unexpected database result: {other:?}"),
-                Err(error) => {
-                    eprintln!("warning: transcript was not saved to the database: {error}")
-                }
-            }
-            if let Err(error) = database.shutdown() {
-                eprintln!("warning: database shutdown failed: {error}");
-            }
+    if let Some(parent) = file.parent() {
+        let transcript_path = parent.join("transcript.md");
+        match export::write_transcript(&transcript_path, &result) {
+            Ok(()) => eprintln!("Saved transcript: {}", transcript_path.display()),
+            Err(error) => eprintln!(
+                "warning: transcript artifact was not saved to {}: {error}",
+                transcript_path.display()
+            ),
         }
-        Err(error) => eprintln!("warning: transcript was not saved to the database: {error}"),
+    }
+
+    let transcript_save = database
+        .writer()
+        .execute(db::WriteCommand::InsertTranscript {
+            meeting_id,
+            transcript: result,
+            speaker_count,
+        });
+    if let Err(error) = transcript_save {
+        eprintln!("warning: transcript was not saved to the database: {error}");
+    } else {
+        eprintln!("Saved meeting {meeting_id} to the database.");
+    }
+    if let Err(error) = database.shutdown() {
+        eprintln!("warning: database shutdown failed: {error}");
     }
     Ok(())
+}
+
+fn persist_pipeline_state(
+    database: &db::Database,
+    meeting_id: i64,
+    state: &pipeline::PipelineState,
+) -> anyhow::Result<()> {
+    for stage in state.stages() {
+        let status = match stage.status {
+            pipeline::StageStatus::Pending => "pending",
+            pipeline::StageStatus::Running => "running",
+            pipeline::StageStatus::Completed => "completed",
+            pipeline::StageStatus::Failed => "failed",
+            pipeline::StageStatus::Cancelled => "cancelled",
+            pipeline::StageStatus::Skipped => "skipped",
+        };
+        let stage_name = match stage.stage {
+            pipeline::Stage::Transcribe => "transcribe",
+            pipeline::Stage::Diarize => "diarize",
+            pipeline::Stage::Summarize => "summarize",
+            pipeline::Stage::Export => "export",
+            pipeline::Stage::Index => "index",
+        };
+        match database
+            .writer()
+            .execute(db::WriteCommand::UpsertPipelineStage(
+                db::PipelineStageUpdate {
+                    meeting_id,
+                    stage: stage_name.to_owned(),
+                    status: status.to_owned(),
+                    attempt: i64::from(stage.attempt),
+                    input_fingerprint: stage.input_fingerprint.clone(),
+                    implementation_id: stage.implementation_id.clone(),
+                    started_at: stage.started_at.clone(),
+                    completed_at: stage.completed_at.clone(),
+                    error_code: stage.error_code.clone(),
+                },
+            ))? {
+            db::WriteResult::Updated(true) => {}
+            other => bail!("unexpected database result while saving pipeline state: {other:?}"),
+        }
+    }
+    Ok(())
+}
+
+fn file_fingerprint(path: &Path) -> anyhow::Result<String> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("could not inspect input file {}", path.display()))?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos());
+    Ok(format!(
+        "{}:{}:{}",
+        path.display(),
+        metadata.len(),
+        modified
+    ))
 }
 
 struct ConsoleModelProgress {
