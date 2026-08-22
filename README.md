@@ -18,6 +18,33 @@ mise run dev
 
 Press `r` to start or stop recording. Use F2 for language, transcription model, diarization, and recording settings.
 
+## CLI examples
+
+Launch the TUI:
+
+```sh
+sosus tui
+```
+
+Record system audio and the default microphone until you press Ctrl+C:
+
+```sh
+sosus record
+```
+
+Transcribe an existing recording, explicitly using Whisper for Swedish:
+
+```sh
+sosus transcribe ~/Downloads/meeting.m4a --backend whisper --language sv
+```
+
+Import an existing file into the meeting archive, or resume a meeting whose processing was interrupted:
+
+```sh
+sosus import ~/Downloads/meeting.m4a
+sosus resume ~/Library/Application\ Support/sosus/recordings/2026-08-22_1430
+```
+
 ## Development
 
 ```sh
