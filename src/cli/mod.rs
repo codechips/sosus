@@ -193,6 +193,7 @@ async fn run_transcribe(
         .context("transcription failed")?;
 
     let mut result = result;
+    let mut speaker_count = 0_usize;
     if effective.effective.diarization.enabled {
         eprintln!("Preparing speaker diarization models...");
         let model_dirs = match models::ensure_diarization_model(
@@ -239,6 +240,7 @@ async fn run_transcribe(
                     Ok(diarization) => {
                         let assignment =
                             diarize::assign_speakers(&mut result, &diarization.turns, false);
+                        speaker_count = assignment.speaker_count;
                         eprintln!(
                             "Diarization complete: {} speaker(s).",
                             assignment.speaker_count
@@ -255,12 +257,58 @@ async fn run_transcribe(
         }
     }
 
-    for segment in result.segments {
-        if let Some(speaker) = segment.speaker {
+    for segment in &result.segments {
+        if let Some(speaker) = &segment.speaker {
             println!("{speaker}: {}", segment.text);
         } else {
             println!("{}", segment.text);
         }
+    }
+
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    let timestamp = now.format(&Rfc3339)?;
+    match db::Database::open(app_paths.database_file()) {
+        Ok(database) => {
+            let save = database
+                .writer()
+                .execute(db::WriteCommand::InsertMeeting(db::NewMeeting {
+                    started_at: timestamp.clone(),
+                    ended_at: Some(timestamp.clone()),
+                    title: None,
+                    duration_s: audio.duration_seconds(),
+                    language: result.language.clone(),
+                    audio_path: Some(file.to_string_lossy().into_owned()),
+                    audio_owned: false,
+                    source: "file".to_owned(),
+                    speaker_count: i64::try_from(speaker_count).unwrap_or(i64::MAX),
+                    created_at: timestamp,
+                }));
+            match save {
+                Ok(db::WriteResult::Inserted(meeting_id)) => {
+                    let transcript_save =
+                        database
+                            .writer()
+                            .execute(db::WriteCommand::InsertTranscript {
+                                meeting_id,
+                                transcript: result.clone(),
+                                speaker_count,
+                            });
+                    if let Err(error) = transcript_save {
+                        eprintln!("warning: transcript was not saved to the database: {error}");
+                    } else {
+                        eprintln!("Saved meeting {meeting_id} to the database.");
+                    }
+                }
+                Ok(other) => eprintln!("warning: unexpected database result: {other:?}"),
+                Err(error) => {
+                    eprintln!("warning: transcript was not saved to the database: {error}")
+                }
+            }
+            if let Err(error) = database.shutdown() {
+                eprintln!("warning: database shutdown failed: {error}");
+            }
+        }
+        Err(error) => eprintln!("warning: transcript was not saved to the database: {error}"),
     }
     Ok(())
 }

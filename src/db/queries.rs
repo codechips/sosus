@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+use crate::asr::TranscriptResult;
+
 use super::models::{Meeting, NewMeeting, NewPassage, Passage};
 
 const CONNECTION_PRAGMAS: &str = "
@@ -224,6 +226,47 @@ pub(super) fn insert_meeting(
         ],
     )?;
     Ok(connection.last_insert_rowid())
+}
+
+pub(super) fn insert_transcript(
+    connection: &Connection,
+    meeting_id: i64,
+    transcript: &TranscriptResult,
+    speaker_count: usize,
+) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
+        "UPDATE meetings SET speaker_count = ?2 WHERE id = ?1",
+        params![meeting_id, i64::try_from(speaker_count).unwrap_or(i64::MAX)],
+    )?;
+    for (index, segment) in transcript.segments.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO segments (meeting_id, idx, start_s, end_s, speaker, text) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                meeting_id,
+                i64::try_from(index).unwrap_or(i64::MAX),
+                segment.start_seconds,
+                segment.end_seconds,
+                segment.speaker,
+                segment.text,
+            ],
+        )?;
+        let segment_id = transaction.last_insert_rowid();
+        for word in &segment.words {
+            transaction.execute(
+                "INSERT INTO words (segment_id, start_s, end_s, text, score, speaker) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    segment_id,
+                    word.start_seconds,
+                    word.end_seconds,
+                    word.text,
+                    f64::from(word.score),
+                    word.speaker,
+                ],
+            )?;
+        }
+    }
+    transaction.commit()
 }
 
 pub(super) fn delete_meeting(connection: &Connection, id: i64) -> rusqlite::Result<bool> {

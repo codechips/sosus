@@ -13,6 +13,8 @@ use std::{
 use rusqlite::{Connection, OpenFlags};
 use thiserror::Error;
 
+use crate::asr::TranscriptResult;
+
 #[allow(unused_imports)]
 pub use models::{Chat, ChatTurn, ChatTurnSource, Citation, PipelineStage, Segment, Summary, Word};
 pub use models::{Meeting, NewMeeting, NewPassage, Passage};
@@ -48,6 +50,11 @@ pub enum DatabaseError {
 #[allow(dead_code)]
 pub enum WriteCommand {
     InsertMeeting(NewMeeting),
+    InsertTranscript {
+        meeting_id: i64,
+        transcript: TranscriptResult,
+        speaker_count: usize,
+    },
     DeleteMeeting(i64),
     InsertPassage(NewPassage),
     UpdatePassageText {
@@ -65,6 +72,7 @@ pub enum WriteCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WriteResult {
     Inserted(i64),
+    Saved,
     Deleted(bool),
     Updated(bool),
     #[cfg(test)]
@@ -242,6 +250,14 @@ fn execute_write(
         WriteCommand::InsertMeeting(meeting) => Ok(WriteResult::Inserted(queries::insert_meeting(
             connection, &meeting,
         )?)),
+        WriteCommand::InsertTranscript {
+            meeting_id,
+            transcript,
+            speaker_count,
+        } => {
+            queries::insert_transcript(connection, meeting_id, &transcript, speaker_count)?;
+            Ok(WriteResult::Saved)
+        }
         WriteCommand::DeleteMeeting(id) => Ok(WriteResult::Deleted(queries::delete_meeting(
             connection, id,
         )?)),
@@ -338,6 +354,126 @@ mod tests {
             WriteResult::Inserted(id) => id,
             other => panic!("expected inserted id, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn transcript_write_persists_speaker_count_and_labels_atomically() {
+        let path = TempDatabasePath::new();
+        let database = Database::open(path.path()).unwrap();
+        let meeting_id = inserted_id(
+            database
+                .writer()
+                .execute(WriteCommand::InsertMeeting(sample_meeting()))
+                .unwrap(),
+        );
+        let transcript = crate::asr::TranscriptResult {
+            language: "en".to_owned(),
+            duration_seconds: 2.0,
+            segments: vec![crate::asr::Segment {
+                start_seconds: 0.0,
+                end_seconds: 2.0,
+                text: "hello there".to_owned(),
+                speaker: Some("Speaker 1".to_owned()),
+                words: vec![crate::asr::Word {
+                    start_seconds: 0.0,
+                    end_seconds: 1.0,
+                    text: "hello".to_owned(),
+                    score: 0.9,
+                    speaker: Some("Speaker 1".to_owned()),
+                }],
+            }],
+        };
+        assert_eq!(
+            database
+                .writer()
+                .execute(WriteCommand::InsertTranscript {
+                    meeting_id,
+                    transcript,
+                    speaker_count: 1,
+                })
+                .unwrap(),
+            WriteResult::Saved
+        );
+
+        let reader = database.reader().unwrap();
+        let meeting = reader.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(meeting.speaker_count, 1);
+        let segment: (String, String) = reader
+            .connection
+            .query_row(
+                "SELECT speaker, text FROM segments WHERE meeting_id = ?1",
+                [meeting_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(segment, ("Speaker 1".to_owned(), "hello there".to_owned()));
+        let word_speaker: String = reader
+            .connection
+            .query_row(
+                "SELECT speaker FROM words WHERE segment_id = (SELECT id FROM segments WHERE meeting_id = ?1)",
+                [meeting_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(word_speaker, "Speaker 1");
+        drop(reader);
+        database.shutdown().unwrap();
+    }
+
+    #[test]
+    fn undiarized_transcript_persists_without_speakers_after_failure() {
+        let path = TempDatabasePath::new();
+        let database = Database::open(path.path()).unwrap();
+        let meeting_id = inserted_id(
+            database
+                .writer()
+                .execute(WriteCommand::InsertMeeting(sample_meeting()))
+                .unwrap(),
+        );
+        let transcript = crate::asr::TranscriptResult {
+            language: "en".to_owned(),
+            duration_seconds: 1.0,
+            segments: vec![crate::asr::Segment {
+                start_seconds: 0.0,
+                end_seconds: 1.0,
+                text: "no speaker label".to_owned(),
+                speaker: None,
+                words: vec![crate::asr::Word {
+                    start_seconds: 0.0,
+                    end_seconds: 1.0,
+                    text: "no".to_owned(),
+                    score: 0.5,
+                    speaker: None,
+                }],
+            }],
+        };
+        assert_eq!(
+            database
+                .writer()
+                .execute(WriteCommand::InsertTranscript {
+                    meeting_id,
+                    transcript,
+                    speaker_count: 0,
+                })
+                .unwrap(),
+            WriteResult::Saved
+        );
+        let reader = database.reader().unwrap();
+        assert_eq!(
+            reader.meeting(meeting_id).unwrap().unwrap().speaker_count,
+            0
+        );
+        let segment_speaker: Option<String> = reader
+            .connection
+            .query_row(
+                "SELECT speaker FROM segments WHERE meeting_id = ?1",
+                [meeting_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(segment_speaker, None);
+        drop(reader);
+        database.shutdown().unwrap();
     }
 
     #[test]
