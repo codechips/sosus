@@ -2,6 +2,10 @@
 
 A local-first macOS meeting recorder. sosus records system audio and an optional microphone, transcribes recordings locally, and can optionally diarize speakers. Recordings and exports remain in a portable filesystem archive.
 
+## Name
+
+The name nods to SOSUS, the historical *Sound Surveillance System*: a passive acoustic listening network. sosus applies that idea narrowly and locally—it records only when you start it, on your Mac, for your own meetings.
+
 ## Run
 
 Requires macOS on Apple silicon, [Mise](https://mise.jdx.dev/), and the capture permissions macOS requests on first use.
