@@ -8,7 +8,7 @@ Stable releases use `YYYY.M.D`, for example `2026.8.22`.
 
 Pre-release builds add a label: `YYYY.M.D-beta.N`, for example `2026.8.22-beta.1`. If a corrected stable build must be made on the same day, use `YYYY.M.D-rN`, for example `2026.8.22-r2`.
 
-The equivalent Git tag is prefixed with `v`: `v2026.8.22`. Release archives use an ISO-formatted date for readability, for example `sosus-2026-08-22-macos-arm64.zip`.
+The equivalent Git tag is prefixed with `v`: `v2026.8.22`. Release archives carry the same calendar version, for example `sosus-2026-8-22-macos-arm64.zip`.
 
 ## Release rules
 
@@ -20,4 +20,4 @@ The equivalent Git tag is prefixed with `v`: `v2026.8.22`. Release archives use 
 
 ## Current convention
 
-The first cross-device test build uses the release date and a beta suffix. If accepted, promote that exact commit under the same date without the beta suffix; do not rebuild different code under the stable version.
+The first cross-device test build uses the release date and a beta suffix. If accepted, cut the stable version from the approved source, changing only release metadata; do not include other code changes or replace the beta artifact.
