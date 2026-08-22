@@ -3,6 +3,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
+    style::{Color, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
@@ -110,17 +111,32 @@ fn spectrum_lines(levels: &[f32], width: usize, height: usize) -> Vec<Line<'stat
                     && height_f < row_from_bottom as f32
                     && height_f >= (row_from_bottom - 1) as f32;
                 if filled {
-                    line.push(Span::styled("█", theme::accent_text()));
+                    line.push(Span::styled("█", spectrum_style(row, height)));
                 } else if cap {
-                    line.push(Span::styled("▔", theme::accent_text()));
+                    line.push(Span::styled(
+                        "▔",
+                        Style::default().fg(Color::Rgb(255, 214, 112)),
+                    ));
                 } else {
-                    // RAV-style dotted field keeps the spectrum legible at rest.
-                    line.push(Span::styled("·", theme::secondary_text()));
+                    // RAV-style dotted field keeps the spectrum legible at rest without
+                    // turning silence into a blank or visually broken component.
+                    line.push(Span::styled(
+                        "·",
+                        Style::default().fg(Color::Rgb(48, 58, 70)),
+                    ));
                 }
             }
             Line::from(line)
         })
         .collect()
+}
+
+fn spectrum_style(row: usize, height: usize) -> Style {
+    let position = 1.0 - row as f32 / height.max(1) as f32;
+    let red = (40.0 + position * 180.0) as u8;
+    let green = (150.0 + position * 70.0) as u8;
+    let blue = (235.0 - position * 120.0) as u8;
+    Style::default().fg(Color::Rgb(red, green, blue))
 }
 
 fn meter_line(label: &str, level: f32, width: usize) -> Line<'static> {
