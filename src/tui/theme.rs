@@ -20,8 +20,16 @@ pub fn secondary_text() -> Style {
     Style::default().fg(Color::Gray)
 }
 
-pub fn accent_text() -> Style {
-    Style::default().fg(Color::Cyan)
+pub fn meter_signal() -> Style {
+    Style::default().fg(Color::Rgb(106, 220, 152))
+}
+
+pub fn meter_track() -> Style {
+    Style::default().fg(Color::Rgb(35, 92, 58))
+}
+
+pub fn recording_indicator() -> Style {
+    Style::default().fg(Color::Red)
 }
 
 pub fn selected_row() -> Style {

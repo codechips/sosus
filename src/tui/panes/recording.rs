@@ -18,7 +18,7 @@ pub fn render(
     _last_recording: Option<&str>,
     input_levels: Option<(f32, f32)>,
 ) {
-    let meter_width = area.width.saturating_sub(8) as usize;
+    let meter_width = area.width.saturating_sub(10) as usize;
     let body = if let Some(_elapsed) = elapsed_seconds {
         let lines = vec![
             meter_line(
@@ -48,10 +48,10 @@ pub fn render(
 
 fn meter_line(label: &str, level: f32, width: usize) -> Line<'static> {
     let filled = (meter_level(level) * width as f32).round() as usize;
-    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(width - filled));
     Line::from(vec![
-        Span::styled(format!("{label:<6}"), theme::secondary_text()),
-        Span::styled(bar, theme::accent_text()),
+        Span::styled(format!("{label:<8}"), theme::secondary_text()),
+        Span::styled("█".repeat(filled), theme::meter_signal()),
+        Span::styled("░".repeat(width - filled), theme::meter_track()),
     ])
 }
 

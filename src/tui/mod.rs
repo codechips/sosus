@@ -29,7 +29,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    text::{Line, Text},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use time::OffsetDateTime;
@@ -767,17 +767,21 @@ fn render_notice(frame: &mut Frame<'_>, title: &str, message: &str, area: Rect) 
 
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let status = if let Some(active) = &app.recording {
-        format!(
-            " ● Recording  {:02}:{:02}  ·  r to stop",
-            active.session.elapsed_seconds() as u64 / 60,
-            active.session.elapsed_seconds() as u64 % 60
-        )
+        let elapsed = active.session.elapsed_seconds() as u64;
+        Line::from(vec![
+            Span::styled(" ●", theme::recording_indicator()),
+            Span::raw(format!(
+                " Recording  {:02}:{:02}  ·  r to stop",
+                elapsed / 60,
+                elapsed % 60
+            )),
+        ])
     } else if app.pipeline_status.is_some() {
-        " Processing recording".to_owned()
+        Line::from(" Processing recording")
     } else if let Some(message) = &app.message {
-        format!(" {message}")
+        Line::from(format!(" {message}"))
     } else {
-        " r to record".to_owned()
+        Line::from(" r to record")
     };
     let status_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     frame.render_widget(
