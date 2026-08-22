@@ -50,6 +50,13 @@ pub struct ModelFile {
     pub bytes: u64,
 }
 
+pub struct AsrModelSummary {
+    pub alias: String,
+    pub source: String,
+    pub bytes: u64,
+    pub installed: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DownloadProgress<'a> {
     pub model: &'a str,
@@ -80,6 +87,21 @@ pub fn manifest() -> Result<ModelManifest, ModelError> {
 }
 
 impl ModelManifest {
+    pub fn asr_models(&self, backend: &str, model_root: &Path) -> Vec<AsrModelSummary> {
+        self.models
+            .iter()
+            .filter(|model| model.kind == "asr" && model.asr_backend.as_deref() == Some(backend))
+            .map(|model| AsrModelSummary {
+                alias: model.alias.clone(),
+                source: model.repository.clone(),
+                bytes: model.total_bytes(),
+                installed: model
+                    .files
+                    .iter()
+                    .all(|file| model_root.join(&model.alias).join(&file.filename).is_file()),
+            })
+            .collect()
+    }
     pub fn model(&self, alias: &str) -> Result<&ModelEntry, ModelError> {
         self.models
             .iter()

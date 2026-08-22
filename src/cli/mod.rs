@@ -654,6 +654,7 @@ async fn run_tui(cli: &Cli) -> anyhow::Result<()> {
             config: effective.saved,
             config_path: effective.locations.config_path.clone(),
             fingerprint: config::fingerprint(&effective.locations.config_path)?,
+            model_dir: app_paths.model_dir().to_path_buf(),
         }),
     };
     crate::tui::run(startup).await

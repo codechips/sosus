@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 pub struct PickerItem {
     pub value: String,
     pub label: String,
+    pub detail: String,
 }
 
 pub enum PickerAction {

@@ -132,6 +132,7 @@ impl App {
                 config: settings.config,
                 config_path: settings.config_path,
                 fingerprint: settings.fingerprint,
+                model_dir: settings.model_dir,
             }),
             confirm_quit_processing: false,
             delete_confirmation: None,
@@ -429,18 +430,25 @@ impl App {
         self.picker = Some(PickerKind::new(
             PickerType::Language,
             "Language",
-            settings.language_options(),
+            settings
+                .language_options()
+                .into_iter()
+                .map(|(value, label)| (value, label, String::new()))
+                .collect(),
             &settings.config().transcription.language,
         ));
     }
     fn open_model_picker(&mut self) {
+        let Some(context) = &self.settings_context else {
+            return;
+        };
         let Some(settings) = &self.settings else {
             return;
         };
         self.picker = Some(PickerKind::new(
             PickerType::Model,
             "Whisper model",
-            modals::settings::SettingsModal::model_options(),
+            modals::settings::SettingsModal::model_options(&context.model_dir),
             &settings.config().transcription.model,
         ));
     }
@@ -689,12 +697,14 @@ pub struct SettingsStartup {
     pub config: Config,
     pub config_path: PathBuf,
     pub fingerprint: ConfigFingerprint,
+    pub model_dir: PathBuf,
 }
 
 struct SettingsContext {
     config: Config,
     config_path: PathBuf,
     fingerprint: ConfigFingerprint,
+    model_dir: PathBuf,
 }
 
 #[derive(Clone, Copy)]
@@ -710,12 +720,16 @@ impl PickerKind {
     fn new(
         kind: PickerType,
         title: &'static str,
-        items: Vec<(String, String)>,
+        items: Vec<(String, String, String)>,
         selected: &str,
     ) -> Self {
         let items = items
             .into_iter()
-            .map(|(value, label)| modals::picker::PickerItem { value, label })
+            .map(|(value, label, detail)| modals::picker::PickerItem {
+                value,
+                label,
+                detail,
+            })
             .collect();
         Self {
             kind,
@@ -1209,7 +1223,7 @@ fn render_picker(frame: &mut Frame<'_>, picker: &modals::picker::PickerModal, ar
         Line::from(""),
     ];
     for (index, item) in visible.into_iter().take(14).enumerate() {
-        let line = Line::from(item.label.clone());
+        let line = Line::from(format!("{}  {}", item.label, item.detail));
         content.push(if index == picker.selected_index() {
             line.style(theme::selected_row())
         } else {

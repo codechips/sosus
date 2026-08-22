@@ -117,21 +117,38 @@ impl SettingsModal {
         );
         options
     }
-    pub fn model_options() -> Vec<(String, String)> {
-        [
-            "",
-            "whisper-tiny",
-            "whisper-base",
-            "whisper-small",
-            "whisper-medium",
-            "whisper-large-v3-turbo",
-            "kb-whisper-base",
-            "nb-whisper-small",
-            "__custom__",
-        ]
-        .into_iter()
-        .map(|model| (model.to_owned(), model_label(model).to_owned()))
-        .collect()
+    pub fn model_options(model_dir: &std::path::Path) -> Vec<(String, String, String)> {
+        let mut options: Vec<(String, String, String)> = crate::models::manifest()
+            .map(|manifest| {
+                manifest
+                    .asr_models("whisper", model_dir)
+                    .into_iter()
+                    .map(|model| {
+                        let status = if model.installed {
+                            "installed"
+                        } else {
+                            "downloads on use"
+                        };
+                        (
+                            model.alias.clone(),
+                            model_label(&model.alias).to_owned(),
+                            format!(
+                                "{} · {} · {}",
+                                model.source,
+                                human_bytes(model.bytes),
+                                status
+                            ),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        options.push((
+            "__custom__".to_owned(),
+            "Import custom model…".to_owned(),
+            "Choose a local GGML/GGUF model file".to_owned(),
+        ));
+        options
     }
 
     fn adjust(&mut self, reverse: bool) {
@@ -217,6 +234,10 @@ impl SettingsModal {
             })
             .collect()
     }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
 }
 
 fn adjust_gain(value: &mut f64, reverse: bool) {
