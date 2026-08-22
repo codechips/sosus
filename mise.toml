@@ -32,6 +32,10 @@ CARGO_NET_OFFLINE=true cargo clippy --locked --all-targets --no-default-features
 CARGO_NET_OFFLINE=true /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' cargo test --locked --all-targets --no-default-features
 """
 
+[tasks.release-version]
+description = "Validate and display the calendar release version, tag, and archive name"
+run = "bash scripts/release-version.sh"
+
 [tasks.release-preflight]
 description = "Check local Developer ID and notary profile references"
 run = "scripts/release-macos.sh preflight"

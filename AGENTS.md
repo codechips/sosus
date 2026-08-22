@@ -23,3 +23,12 @@ bd prime                # Refresh Beads context
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->
+
+## Release workflow
+
+- sosus uses calendar versions: `YYYY.M.D`, `YYYY.M.D-beta.N`, and `YYYY.M.D-rN`. Do not use SemVer.
+- A release tag is `v<version>` and must exactly match `Cargo.toml`. Tags and published artifacts are immutable: never move, reuse, or replace them.
+- Release only from a clean `main` commit after `mise run ci` and `mise run release-version` pass.
+- Pushing a matching `v20*` tag runs GitHub Actions to build, sign, notarize, checksum, and publish the release. Do not create a release tag until the version commit is pushed and GitHub release secrets are configured.
+- The authoritative release policy and secret setup are [docs/releases.md](docs/releases.md) and [docs/github-releases.md](docs/github-releases.md).
+- Never expose, commit, print, or attempt to recreate signing or notarization secrets.

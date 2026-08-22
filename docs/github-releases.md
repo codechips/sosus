@@ -21,7 +21,7 @@ The certificate and API key are decoded only on the ephemeral macOS runner. The 
 ## Cutting a release
 
 1. Change `Cargo.toml` to the intended calendar version and commit it to `main`.
-2. Confirm `mise run ci` passes.
+2. Confirm `mise run release-version` and `mise run ci` pass.
 3. Create and push the matching annotated tag, for example `v2026.8.22-beta.1`.
 4. Wait for the `Release` workflow. It is the source of the published artifact and checksum.
 
