@@ -23,8 +23,10 @@ Press `r` to start or stop recording. Use F2 for language, transcription model, 
 Launch the TUI:
 
 ```sh
-sosus tui
+sosus
 ```
+
+`tui` is an optional explicit subcommand: `sosus tui` is equivalent.
 
 Record system audio and the default microphone until you press Ctrl+C:
 
