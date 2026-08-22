@@ -161,13 +161,15 @@ impl RecordingSession {
                 .filter(|(frequency, _)| frequency.val() >= low && frequency.val() < high)
                 .map(|(_, amplitude)| amplitude.val())
                 .fold(0.0_f32, f32::max);
-            levels.push(((20.0 * amplitude.max(1.0e-7).log10() + 70.0) / 70.0).clamp(0.0, 1.0));
+            // Use a speech-oriented range so ordinary conversation occupies the
+            // display instead of collapsing into a few barely visible pixels.
+            levels.push(((20.0 * amplitude.max(1.0e-7).log10() + 55.0) / 55.0).clamp(0.0, 1.0));
         }
         if self.spectrum_levels.len() != bands {
             self.spectrum_levels = vec![0.0; bands];
         }
         for (previous, current) in self.spectrum_levels.iter_mut().zip(levels) {
-            *previous = (*previous * 0.65 + current * 0.35).clamp(0.0, 1.0);
+            *previous = (*previous * 0.45 + current * 0.55).clamp(0.0, 1.0);
         }
         self.spectrum_levels.clone()
     }
