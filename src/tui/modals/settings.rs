@@ -122,7 +122,14 @@ impl SettingsModal {
                 }
             }
             Field::Model => {
-                if self.draft.transcription.backend == TranscriptionBackend::Whisper {
+                if self.draft.transcription.backend == TranscriptionBackend::Parakeet {
+                    self.draft.transcription.backend = TranscriptionBackend::Whisper;
+                    self.draft.transcription.model = if reverse {
+                        "nb-whisper-small".to_owned()
+                    } else {
+                        "whisper-tiny".to_owned()
+                    };
+                } else {
                     self.draft.transcription.model =
                         cycle_model(&self.draft.transcription.model, reverse);
                 }
@@ -145,6 +152,11 @@ impl SettingsModal {
                         TranscriptionBackend::Parakeet => "Parakeet".to_owned(),
                         TranscriptionBackend::Whisper => "Whisper".to_owned(),
                     },
+                    Field::Model
+                        if self.draft.transcription.backend == TranscriptionBackend::Parakeet =>
+                    {
+                        "Choose a Whisper model".to_owned()
+                    }
                     Field::Model => model_label(&self.draft.transcription.model).to_owned(),
                     Field::JsonExport => on_off(self.draft.output.json).to_owned(),
                 };
@@ -263,5 +275,19 @@ mod tests {
         assert_eq!(settings.config().transcription.language, "en");
         settings.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         assert_eq!(settings.config().transcription.language, "sv");
+    }
+
+    #[test]
+    fn selecting_a_model_switches_from_parakeet_to_whisper() {
+        let mut settings = SettingsModal::new(Config::default());
+        for _ in 0..6 {
+            settings.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        settings.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(
+            settings.config().transcription.backend,
+            TranscriptionBackend::Whisper
+        );
+        assert_eq!(settings.config().transcription.model, "whisper-tiny");
     }
 }
