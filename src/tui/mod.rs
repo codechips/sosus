@@ -152,6 +152,24 @@ impl App {
         }
     }
 
+    fn move_selection(&mut self, delta: isize) {
+        if self.meetings.is_empty() {
+            return;
+        }
+        let last = self.meetings.len() - 1;
+        self.selected_meeting = if delta.is_negative() {
+            self.selected_meeting.saturating_sub(delta.unsigned_abs())
+        } else {
+            (self.selected_meeting + delta as usize).min(last)
+        };
+        if let Some(reader) = &self.database_reader {
+            if let Some(meeting) = self.meetings.get(self.selected_meeting) {
+                self.summary = reader.latest_summary(meeting.id).ok().flatten();
+                self.transcript = reader.segments(meeting.id).unwrap_or_default();
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppAction> {
         if self.error.is_some() {
             match (key.code, key.modifiers) {
@@ -180,6 +198,12 @@ impl App {
         }
 
         match (key.code, key.modifiers) {
+            (KeyCode::Up | KeyCode::Char('k'), _) if self.focus == Focus::Meetings => {
+                self.move_selection(-1);
+            }
+            (KeyCode::Down | KeyCode::Char('j'), _) if self.focus == Focus::Meetings => {
+                self.move_selection(1);
+            }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) if self.recording.is_some() => {
                 return Some(AppAction::StopRecording);
             }
@@ -838,6 +862,45 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
             Some(AppAction::ToggleRecording)
         );
+    }
+
+    #[test]
+    fn meetings_navigation_is_bounded() {
+        let mut app = app();
+        app.meetings = vec![
+            Meeting {
+                id: 1,
+                started_at: String::new(),
+                ended_at: None,
+                title: None,
+                duration_s: 1.0,
+                language: String::new(),
+                audio_path: None,
+                audio_owned: false,
+                source: "recording".to_owned(),
+                speaker_count: 0,
+                created_at: String::new(),
+            },
+            Meeting {
+                id: 2,
+                started_at: String::new(),
+                ended_at: None,
+                title: None,
+                duration_s: 2.0,
+                language: String::new(),
+                audio_path: None,
+                audio_owned: false,
+                source: "recording".to_owned(),
+                speaker_count: 0,
+                created_at: String::new(),
+            },
+        ];
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.selected_meeting, 1);
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected_meeting, 1);
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.selected_meeting, 0);
     }
 
     #[test]
