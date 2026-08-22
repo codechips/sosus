@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::asr::TranscriptResult;
 
-use super::models::{Meeting, NewMeeting, NewPassage, Passage};
+use super::models::{Meeting, NewMeeting, NewPassage, Passage, PipelineStage, PipelineStageUpdate};
 
 const CONNECTION_PRAGMAS: &str = "
 PRAGMA foreign_keys = ON;
@@ -267,6 +267,81 @@ pub(super) fn insert_transcript(
         }
     }
     transaction.commit()
+}
+
+pub(super) fn upsert_pipeline_stage(
+    connection: &Connection,
+    update: &PipelineStageUpdate,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "INSERT INTO pipeline_stages (meeting_id, stage, status, attempt, input_fingerprint, implementation_id, started_at, completed_at, error_code)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(meeting_id, stage) DO UPDATE SET
+           status = excluded.status,
+           attempt = excluded.attempt,
+           input_fingerprint = excluded.input_fingerprint,
+           implementation_id = excluded.implementation_id,
+           started_at = excluded.started_at,
+           completed_at = excluded.completed_at,
+           error_code = excluded.error_code",
+        params![
+            update.meeting_id,
+            update.stage,
+            update.status,
+            update.attempt,
+            update.input_fingerprint,
+            update.implementation_id,
+            update.started_at,
+            update.completed_at,
+            update.error_code,
+        ],
+    )?;
+    Ok(())
+}
+
+pub(super) fn recover_interrupted_stages(
+    connection: &Connection,
+    meeting_id: Option<i64>,
+) -> rusqlite::Result<usize> {
+    let changed = match meeting_id {
+        Some(meeting_id) => connection.execute(
+            "UPDATE pipeline_stages SET status = 'failed', error_code = 'interrupted', completed_at = NULL WHERE meeting_id = ?1 AND status = 'running'",
+            [meeting_id],
+        )?,
+        None => connection.execute(
+            "UPDATE pipeline_stages SET status = 'failed', error_code = 'interrupted', completed_at = NULL WHERE status = 'running'",
+            [],
+        )?,
+    };
+    Ok(changed)
+}
+
+#[allow(dead_code)]
+pub(super) fn pipeline_stage(
+    connection: &Connection,
+    meeting_id: i64,
+    stage: &str,
+) -> rusqlite::Result<Option<PipelineStage>> {
+    connection
+        .query_row(
+            "SELECT meeting_id, stage, status, attempt, input_fingerprint, implementation_id, started_at, completed_at, error_code
+             FROM pipeline_stages WHERE meeting_id = ?1 AND stage = ?2",
+            params![meeting_id, stage],
+            |row| {
+                Ok(PipelineStage {
+                    meeting_id: row.get(0)?,
+                    stage: row.get(1)?,
+                    status: row.get(2)?,
+                    attempt: row.get(3)?,
+                    input_fingerprint: row.get(4)?,
+                    implementation_id: row.get(5)?,
+                    started_at: row.get(6)?,
+                    completed_at: row.get(7)?,
+                    error_code: row.get(8)?,
+                })
+            },
+        )
+        .optional()
 }
 
 pub(super) fn delete_meeting(connection: &Connection, id: i64) -> rusqlite::Result<bool> {

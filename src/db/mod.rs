@@ -16,7 +16,10 @@ use thiserror::Error;
 use crate::asr::TranscriptResult;
 
 #[allow(unused_imports)]
-pub use models::{Chat, ChatTurn, ChatTurnSource, Citation, PipelineStage, Segment, Summary, Word};
+pub use models::{
+    Chat, ChatTurn, ChatTurnSource, Citation, PipelineStage, PipelineStageUpdate, Segment, Summary,
+    Word,
+};
 pub use models::{Meeting, NewMeeting, NewPassage, Passage};
 pub use schema::LATEST_SCHEMA_VERSION;
 
@@ -55,6 +58,10 @@ pub enum WriteCommand {
         transcript: TranscriptResult,
         speaker_count: usize,
     },
+    UpsertPipelineStage(PipelineStageUpdate),
+    RecoverInterruptedStages {
+        meeting_id: Option<i64>,
+    },
     DeleteMeeting(i64),
     InsertPassage(NewPassage),
     UpdatePassageText {
@@ -73,6 +80,7 @@ pub enum WriteCommand {
 pub enum WriteResult {
     Inserted(i64),
     Saved,
+    Recovered(usize),
     Deleted(bool),
     Updated(bool),
     #[cfg(test)]
@@ -122,6 +130,19 @@ impl DatabaseReader {
     #[allow(dead_code)]
     pub fn passage(&self, id: i64) -> Result<Option<Passage>, DatabaseError> {
         Ok(queries::passage(&self.connection, id)?)
+    }
+
+    #[allow(dead_code)]
+    pub fn pipeline_stage(
+        &self,
+        meeting_id: i64,
+        stage: &str,
+    ) -> Result<Option<PipelineStage>, DatabaseError> {
+        Ok(queries::pipeline_stage(
+            &self.connection,
+            meeting_id,
+            stage,
+        )?)
     }
 
     pub fn connection_settings(&self) -> Result<(bool, String), DatabaseError> {
@@ -258,6 +279,13 @@ fn execute_write(
             queries::insert_transcript(connection, meeting_id, &transcript, speaker_count)?;
             Ok(WriteResult::Saved)
         }
+        WriteCommand::UpsertPipelineStage(update) => {
+            queries::upsert_pipeline_stage(connection, &update)?;
+            Ok(WriteResult::Updated(true))
+        }
+        WriteCommand::RecoverInterruptedStages { meeting_id } => Ok(WriteResult::Recovered(
+            queries::recover_interrupted_stages(connection, meeting_id)?,
+        )),
         WriteCommand::DeleteMeeting(id) => Ok(WriteResult::Deleted(queries::delete_meeting(
             connection, id,
         )?)),
@@ -472,6 +500,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(segment_speaker, None);
+        drop(reader);
+        database.shutdown().unwrap();
+    }
+
+    #[test]
+    fn pipeline_stage_state_is_durable_and_running_work_recovers() {
+        let path = TempDatabasePath::new();
+        let database = Database::open(path.path()).unwrap();
+        let meeting_id = inserted_id(
+            database
+                .writer()
+                .execute(WriteCommand::InsertMeeting(sample_meeting()))
+                .unwrap(),
+        );
+        let stage = PipelineStageUpdate {
+            meeting_id,
+            stage: "transcribe".to_owned(),
+            status: "running".to_owned(),
+            attempt: 1,
+            input_fingerprint: "audio-a".to_owned(),
+            implementation_id: "parakeet-a".to_owned(),
+            started_at: Some("t0".to_owned()),
+            completed_at: None,
+            error_code: None,
+        };
+        assert_eq!(
+            database
+                .writer()
+                .execute(WriteCommand::UpsertPipelineStage(stage))
+                .unwrap(),
+            WriteResult::Updated(true)
+        );
+        let reader = database.reader().unwrap();
+        assert_eq!(
+            reader
+                .pipeline_stage(meeting_id, "transcribe")
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
+        );
+        drop(reader);
+        assert_eq!(
+            database
+                .writer()
+                .execute(WriteCommand::RecoverInterruptedStages {
+                    meeting_id: Some(meeting_id),
+                })
+                .unwrap(),
+            WriteResult::Recovered(1)
+        );
+        let reader = database.reader().unwrap();
+        let recovered = reader
+            .pipeline_stage(meeting_id, "transcribe")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status, "failed");
+        assert_eq!(recovered.error_code.as_deref(), Some("interrupted"));
         drop(reader);
         database.shutdown().unwrap();
     }

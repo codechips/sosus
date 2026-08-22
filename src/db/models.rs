@@ -42,6 +42,19 @@ pub struct PipelineStage {
     pub error_code: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineStageUpdate {
+    pub meeting_id: i64,
+    pub stage: String,
+    pub status: String,
+    pub attempt: i64,
+    pub input_fingerprint: String,
+    pub implementation_id: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub error_code: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Segment {
     pub id: i64,
