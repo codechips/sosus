@@ -67,10 +67,30 @@ pub fn render(
 }
 
 fn meter_line(label: &str, level: f32) -> Line<'static> {
-    let filled = (level.clamp(0.0, 1.0) * 10.0).round() as usize;
+    let filled = (meter_level(level) * 10.0).round() as usize;
     let bar = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
     Line::from(vec![
         Span::styled(format!("{label:<6}"), theme::secondary_text()),
         Span::styled(bar, theme::accent_text()),
     ])
+}
+
+fn meter_level(peak: f32) -> f32 {
+    if peak <= 0.0001 {
+        return 0.0;
+    }
+    // Display a useful speech range: -50 dBFS is empty, 0 dBFS is full.
+    ((20.0 * peak.log10() + 50.0) / 50.0).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::meter_level;
+
+    #[test]
+    fn meter_uses_speech_friendly_db_scaling() {
+        assert_eq!(meter_level(0.0), 0.0);
+        assert!(meter_level(0.03) > 0.3);
+        assert_eq!(meter_level(1.0), 1.0);
+    }
 }
