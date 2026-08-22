@@ -45,6 +45,7 @@ pub struct RecordingSession {
     system_peak: f32,
     microphone_peak: f32,
     echo_canceller: EchoCanceller,
+    microphone_muted: bool,
 }
 
 impl RecordingSession {
@@ -103,6 +104,7 @@ impl RecordingSession {
             system_peak: 0.0,
             microphone_peak: 0.0,
             echo_canceller: EchoCanceller::default(),
+            microphone_muted: false,
         })
     }
 
@@ -154,7 +156,23 @@ impl RecordingSession {
     }
 
     pub fn input_levels(&self) -> (f32, f32) {
-        (self.system_peak, self.microphone_peak)
+        (
+            self.system_peak,
+            if self.microphone_muted {
+                0.0
+            } else {
+                self.microphone_peak
+            },
+        )
+    }
+
+    pub fn toggle_microphone_muted(&mut self) -> bool {
+        self.microphone_muted = !self.microphone_muted;
+        self.microphone_muted
+    }
+
+    pub fn microphone_muted(&self) -> bool {
+        self.microphone_muted
     }
 
     fn drain_microphone(&mut self) {
@@ -217,7 +235,7 @@ impl RecordingSession {
             let microphone = self.microphone_ready.pop_front().unwrap_or(0.0);
             let microphone = self.echo_canceller.process(system, microphone);
             self.mix
-                .push((system * DEFAULT_GAIN + microphone * DEFAULT_GAIN).clamp(-1.0, 1.0));
+                .push(mix_sample(system, microphone, self.microphone_muted));
         }
         self.sink.write_samples(&self.mix)?;
         Ok(())
@@ -235,6 +253,11 @@ fn peak(samples: &[f32]) -> f32 {
         .map(f32::abs)
         .fold(0.0, f32::max)
         .min(1.0)
+}
+
+fn mix_sample(system: f32, microphone: f32, microphone_muted: bool) -> f32 {
+    let microphone = if microphone_muted { 0.0 } else { microphone };
+    (system * DEFAULT_GAIN + microphone * DEFAULT_GAIN).clamp(-1.0, 1.0)
 }
 
 fn samples_due(elapsed_seconds: f64, samples_written: u64) -> usize {
@@ -393,5 +416,12 @@ mod tests {
     fn peak_meter_uses_absolute_clamped_signal() {
         assert_eq!(peak(&[-0.25, 0.6, -1.2]), 1.0);
         assert_eq!(peak(&[]), 0.0);
+    }
+
+    #[test]
+    fn microphone_mute_preserves_system_audio_and_timeline_samples() {
+        let mixed = mix_sample(0.8, 0.6, true);
+        assert_eq!(mixed, 0.8 * DEFAULT_GAIN);
+        assert_ne!(mixed, 0.0);
     }
 }

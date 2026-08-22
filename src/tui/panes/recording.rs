@@ -17,8 +17,9 @@ pub fn render(
     elapsed_seconds: Option<f64>,
     _last_recording: Option<&str>,
     input_levels: Option<(f32, f32)>,
+    microphone_muted: bool,
 ) {
-    let meter_width = area.width.saturating_sub(10) as usize;
+    let meter_width = area.width.saturating_sub(12) as usize;
     let body = if let Some(_elapsed) = elapsed_seconds {
         let lines = vec![
             meter_line(
@@ -27,7 +28,7 @@ pub fn render(
                 meter_width,
             ),
             meter_line(
-                "Mic",
+                if microphone_muted { "Mic muted" } else { "Mic" },
                 input_levels.map_or(0.0, |levels| levels.1),
                 meter_width,
             ),
@@ -49,7 +50,7 @@ pub fn render(
 fn meter_line(label: &str, level: f32, width: usize) -> Line<'static> {
     let filled = (meter_level(level) * width as f32).round() as usize;
     Line::from(vec![
-        Span::styled(format!("{label:<8}"), theme::secondary_text()),
+        Span::styled(format!("{label:<10}"), theme::secondary_text()),
         Span::styled("█".repeat(filled), theme::meter_signal()),
         Span::styled("░".repeat(width - filled), theme::meter_track()),
     ])

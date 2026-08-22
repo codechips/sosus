@@ -275,6 +275,7 @@ impl App {
                 self.should_quit = true;
             }
             (KeyCode::Char('r'), _) => return Some(AppAction::ToggleRecording),
+            (KeyCode::Char('m'), _) => return microphone_mute_action(self.recording.is_some()),
             (KeyCode::Char('t'), _) if self.recording.is_none() && !self.pipeline_active => {
                 if let Some(meeting) = self.meetings.get(self.selected_meeting) {
                     return Some(AppAction::TranscribeMeeting(meeting.path.clone()));
@@ -516,6 +517,9 @@ impl App {
                     .map(|active| active.session.elapsed_seconds()),
                 self.last_recording.as_deref(),
                 self.input_levels,
+                self.recording
+                    .as_ref()
+                    .is_some_and(|active| active.session.microphone_muted()),
             );
         }
 
@@ -559,11 +563,16 @@ struct ActiveRecording {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AppAction {
     ToggleRecording,
+    ToggleMicrophoneMute,
     StopRecording,
     StopRecordingAndQuit,
     TranscribeMeeting(PathBuf),
     OpenMeetingFolder(PathBuf),
     TrashMeetingFolder(PathBuf),
+}
+
+fn microphone_mute_action(recording_active: bool) -> Option<AppAction> {
+    recording_active.then_some(AppAction::ToggleMicrophoneMute)
 }
 
 pub async fn run(startup: Startup) -> anyhow::Result<()> {
@@ -616,6 +625,11 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                             Some(AppAction::ToggleRecording) => {
                                 if let Err(error) = app.start_recording().await {
                                     app.error = Some(format!("{error:#}"));
+                                }
+                            }
+                            Some(AppAction::ToggleMicrophoneMute) => {
+                                if let Some(active) = &mut app.recording {
+                                    active.session.toggle_microphone_muted();
                                 }
                             }
                             Some(AppAction::StopRecording) => {
@@ -961,6 +975,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("Tab / Shift+Tab  Move focus"),
         Line::from("F2               Settings preview"),
         Line::from("r                Start / stop recording"),
+        Line::from("m                Mute / unmute microphone"),
         Line::from("t                Transcribe selected recording"),
         Line::from("o                Open selected recording in Finder"),
         Line::from("d / D            Delete with confirmation / immediately"),
@@ -1055,10 +1070,15 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, meeting_name: &str, area: R
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let status = if let Some(active) = &app.recording {
         let elapsed = active.session.elapsed_seconds() as u64;
+        let microphone_status = if active.session.microphone_muted() {
+            "·  MIC MUTED  ·  m to unmute"
+        } else {
+            "·  m to mute"
+        };
         Line::from(vec![
             Span::styled(" ●", theme::recording_indicator()),
             Span::raw(format!(
-                " Recording  {:02}:{:02}  ·  r to stop",
+                " Recording  {:02}:{:02}  ·  r to stop {microphone_status}",
                 elapsed / 60,
                 elapsed % 60
             )),
@@ -1331,6 +1351,15 @@ mod tests {
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
             Some(AppAction::ToggleRecording)
+        );
+    }
+
+    #[test]
+    fn microphone_mute_shortcut_only_dispatches_while_recording() {
+        assert_eq!(microphone_mute_action(false), None);
+        assert_eq!(
+            microphone_mute_action(true),
+            Some(AppAction::ToggleMicrophoneMute)
         );
     }
 
