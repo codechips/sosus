@@ -9,22 +9,48 @@ use ratatui::{
 
 use crate::tui::theme;
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, focused: bool) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focused: bool,
+    elapsed_seconds: Option<f64>,
+    last_recording: Option<&str>,
+) {
     let title = if focused {
         "▶ Recording"
     } else {
         "Recording"
     };
-    let body = Text::from(vec![
-        Line::from(vec![
-            Span::styled("Status  ", theme::secondary_text()),
-            Span::styled("UNAVAILABLE", theme::warning_text()),
-        ]),
-        Line::styled(
-            "Core recording is being built now.",
-            theme::secondary_text(),
-        ),
-    ]);
+    let body = if let Some(elapsed) = elapsed_seconds {
+        let minutes = elapsed as u64 / 60;
+        let seconds = elapsed as u64 % 60;
+        Text::from(vec![
+            Line::from(vec![
+                Span::styled("Status  ", theme::secondary_text()),
+                Span::styled("RECORDING", theme::warning_text()),
+            ]),
+            Line::styled(
+                format!("Elapsed {minutes:02}:{seconds:02}"),
+                theme::primary_text(),
+            ),
+            Line::styled("r or Ctrl+C to stop", theme::secondary_text()),
+        ])
+    } else {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Status  ", theme::secondary_text()),
+                Span::styled("READY", theme::primary_text()),
+            ]),
+            Line::styled("r to start recording", theme::secondary_text()),
+        ];
+        if let Some(path) = last_recording {
+            lines.push(Line::styled(
+                format!("Saved {path}"),
+                theme::secondary_text(),
+            ));
+        }
+        Text::from(lines)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)

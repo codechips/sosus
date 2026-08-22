@@ -9,6 +9,7 @@ use std::{
     collections::VecDeque,
     io::{self, Stdout},
     panic,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -31,9 +32,15 @@ use ratatui::{
     text::{Line, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::mpsc;
 
-use crate::pipeline::{self, AppEvent as PipelineEvent};
+use crate::{
+    audio,
+    db::{DatabaseWriter, NewMeeting, WriteCommand, WriteResult},
+    paths::AppPaths,
+    pipeline::{self, AppEvent as PipelineEvent},
+};
 
 const MINIMUM_WIDTH: u16 = 80;
 const MINIMUM_HEIGHT: u16 = 24;
@@ -87,6 +94,9 @@ struct App {
     should_quit: bool,
     message: Option<String>,
     warnings: VecDeque<String>,
+    recording_context: Option<RecordingStartup>,
+    recording: Option<ActiveRecording>,
+    last_recording: Option<String>,
 }
 
 impl App {
@@ -100,40 +110,50 @@ impl App {
             should_quit: false,
             message: None,
             warnings: startup.warnings.into(),
+            recording_context: startup.recording,
+            recording: None,
+            last_recording: None,
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
+    fn handle_key(&mut self, key: KeyEvent) -> Option<AppAction> {
         if self.error.is_some() {
             match (key.code, key.modifiers) {
                 (KeyCode::Esc | KeyCode::Enter, _) => {
                     self.error = None;
-                    return;
+                    return None;
                 }
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {}
-                _ => return,
+                _ => return None,
             }
         } else if !self.warnings.is_empty() {
             match (key.code, key.modifiers) {
                 (KeyCode::Esc | KeyCode::Enter, _) => {
                     self.warnings.pop_front();
-                    return;
+                    return None;
                 }
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {}
-                _ => return,
+                _ => return None,
             }
         }
 
         if key.code == KeyCode::Esc && (self.show_help || self.show_settings) {
             self.show_help = false;
             self.show_settings = false;
-            return;
+            return None;
         }
 
         match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) if self.recording.is_some() => {
+                return Some(AppAction::StopRecording);
+            }
+            (KeyCode::Char('q'), _) if self.recording.is_some() => {
+                return Some(AppAction::StopRecordingAndQuit);
+            }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
                 self.should_quit = true;
             }
+            (KeyCode::Char('r'), _) => return Some(AppAction::ToggleRecording),
             (KeyCode::Char('?'), _) => self.show_help = !self.show_help,
             (KeyCode::F(2), _) => self.show_settings = !self.show_settings,
             (KeyCode::Tab, KeyModifiers::SHIFT) | (KeyCode::BackTab, _) => {
@@ -142,6 +162,81 @@ impl App {
             (KeyCode::Tab, _) => self.focus = self.focus.next(),
             _ => {}
         }
+        None
+    }
+
+    async fn start_recording(&mut self) -> anyhow::Result<()> {
+        let context = self
+            .recording_context
+            .as_ref()
+            .context("recording is not configured")?;
+        audio::ensure_capture_permissions().await?;
+        let started_at = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+        let meeting_dir = context.app_paths.create_meeting_dir(started_at)?;
+        let session = audio::RecordingSession::start(meeting_dir.join("recording.wav"))?;
+        self.recording = Some(ActiveRecording {
+            session,
+            started_at,
+            meeting_dir,
+        });
+        self.message = Some("Recording started".to_owned());
+        Ok(())
+    }
+
+    fn stop_recording(&mut self) -> anyhow::Result<()> {
+        let Some(active) = self.recording.take() else {
+            return Ok(());
+        };
+        let context = self
+            .recording_context
+            .as_ref()
+            .context("recording is not configured")?;
+        let outcome = active.session.finish()?;
+        let ended_at = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+        let started_at_text = active.started_at.format(&Rfc3339)?;
+        let result = context
+            .database_writer
+            .execute(WriteCommand::InsertMeeting(NewMeeting {
+                started_at: started_at_text.clone(),
+                ended_at: Some(ended_at.format(&Rfc3339)?),
+                title: None,
+                duration_s: outcome.duration_seconds,
+                language: context.language.clone(),
+                audio_path: Some(outcome.path.to_string_lossy().into_owned()),
+                audio_owned: true,
+                source: "recording".to_owned(),
+                speaker_count: 0,
+                created_at: started_at_text,
+            }))?;
+        let meeting_id = match result {
+            WriteResult::Inserted(id) => id,
+            other => anyhow::bail!("unexpected database result while saving recording: {other:?}"),
+        };
+
+        self.last_recording = Some(active.meeting_dir.display().to_string());
+        self.message = Some(format!(
+            "Saved meeting {meeting_id} ({:.1}s)",
+            outcome.duration_seconds
+        ));
+        if outcome.system_dropouts > 0 || outcome.microphone_dropouts > 0 {
+            self.message = Some(format!(
+                "Saved meeting {meeting_id}; dropouts system={}, mic={}",
+                outcome.system_dropouts, outcome.microphone_dropouts
+            ));
+        }
+        if outcome.microphone_failed {
+            self.message = Some(format!(
+                "Saved meeting {meeting_id}; microphone stream was lost"
+            ));
+        }
+        Ok(())
+    }
+
+    fn pump_recording(&mut self) -> anyhow::Result<()> {
+        if let Some(active) = &mut self.recording {
+            active.session.pump()?;
+        }
+        Ok(())
     }
 
     fn handle_pipeline_event(&mut self, event: PipelineEvent) {
@@ -184,7 +279,15 @@ impl App {
         );
         panes::transcript::render(frame, columns[1], self.focus == Focus::Transcript);
         panes::chat::render(frame, right[0], self.focus == Focus::Chat);
-        panes::recording::render(frame, right[1], self.focus == Focus::Recording);
+        panes::recording::render(
+            frame,
+            right[1],
+            self.focus == Focus::Recording,
+            self.recording
+                .as_ref()
+                .map(|active| active.session.elapsed_seconds()),
+            self.last_recording.as_deref(),
+        );
 
         if let Some(error) = &self.error {
             render_notice(frame, "Error", error, centered_rect(70, 42, area));
@@ -208,6 +311,26 @@ impl App {
 pub struct Startup {
     pub archive_dir: String,
     pub warnings: Vec<String>,
+    pub recording: Option<RecordingStartup>,
+}
+
+pub struct RecordingStartup {
+    pub app_paths: AppPaths,
+    pub database_writer: DatabaseWriter,
+    pub language: String,
+}
+
+struct ActiveRecording {
+    session: audio::RecordingSession,
+    started_at: OffsetDateTime,
+    meeting_dir: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppAction {
+    ToggleRecording,
+    StopRecording,
+    StopRecordingAndQuit,
 }
 
 pub async fn run(startup: Startup) -> anyhow::Result<()> {
@@ -229,10 +352,43 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
         terminal.draw(|frame| app.render(frame))?;
 
         tokio::select! {
-            _ = tick.tick() => {}
+            _ = tick.tick() => {
+                if let Err(error) = app.pump_recording() {
+                    let finalize_error = app.stop_recording().err();
+                    app.error = Some(match finalize_error {
+                        Some(finalize) => format!("{error:#}; finalization also failed: {finalize:#}"),
+                        None => format!("{error:#}"),
+                    });
+                }
+            }
             maybe_event = input.recv() => {
                 match maybe_event {
-                    Some(UiEvent::Terminal(Event::Key(key))) if key.is_press() => app.handle_key(key),
+                    Some(UiEvent::Terminal(Event::Key(key))) if key.is_press() => {
+                        match app.handle_key(key) {
+                            Some(AppAction::ToggleRecording) if app.recording.is_some() => {
+                                if let Err(error) = app.stop_recording() {
+                                    app.error = Some(format!("{error:#}"));
+                                }
+                            }
+                            Some(AppAction::ToggleRecording) => {
+                                if let Err(error) = app.start_recording().await {
+                                    app.error = Some(format!("{error:#}"));
+                                }
+                            }
+                            Some(AppAction::StopRecording) => {
+                                if let Err(error) = app.stop_recording() {
+                                    app.error = Some(format!("{error:#}"));
+                                }
+                            }
+                            Some(AppAction::StopRecordingAndQuit) => {
+                                match app.stop_recording() {
+                                    Ok(()) => app.should_quit = true,
+                                    Err(error) => app.error = Some(format!("{error:#}")),
+                                }
+                            }
+                            None => {}
+                        }
+                    }
                     Some(UiEvent::Terminal(_)) => {}
                     Some(UiEvent::InputError(error)) => app.error = Some(error),
                     None => {
@@ -248,6 +404,12 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                 }
             }
         }
+    }
+
+    if let Err(error) = app.stop_recording() {
+        input.stop().context("stop terminal input reader")?;
+        pipeline.shutdown().context("stop pipeline worker")?;
+        return Err(error).context("finalize recording during terminal shutdown");
     }
 
     input.stop().context("stop terminal input reader")?;
@@ -427,8 +589,10 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     let content = Text::from(vec![
         Line::from("Tab / Shift+Tab  Move focus"),
         Line::from("F2               Settings preview"),
+        Line::from("r                Start / stop recording"),
         Line::from("?                Toggle help"),
-        Line::from("q / Ctrl+C       Quit"),
+        Line::from("q                Stop recording and quit"),
+        Line::from("Ctrl+C           Stop recording, otherwise quit"),
         Line::from("Esc              Close overlay"),
     ]);
     let block = Block::default()
@@ -504,17 +668,18 @@ mod tests {
         App::new(Startup {
             archive_dir: "/tmp/sosus-test-recordings".to_owned(),
             warnings: Vec::new(),
+            recording: None,
         })
     }
 
     #[test]
     fn focus_cycles_in_both_directions() {
         let mut app = app();
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::Transcript);
-        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(app.focus, Focus::Meetings);
-        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(app.focus, Focus::Recording);
     }
 
@@ -525,9 +690,18 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         ] {
             let mut app = app();
-            app.handle_key(key);
+            let _ = app.handle_key(key);
             assert!(app.should_quit);
         }
+    }
+
+    #[test]
+    fn recording_key_requests_a_toggle() {
+        let mut app = app();
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Some(AppAction::ToggleRecording)
+        );
     }
 
     #[test]
@@ -535,13 +709,14 @@ mod tests {
         let mut app = App::new(Startup {
             archive_dir: "/tmp/sosus-test-recordings".to_owned(),
             warnings: vec!["first".to_owned(), "second".to_owned()],
+            recording: None,
         });
         assert_eq!(app.warnings.front().map(String::as_str), Some("first"));
 
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.warnings.front().map(String::as_str), Some("second"));
 
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.warnings.is_empty());
     }
 
@@ -582,7 +757,7 @@ mod tests {
             "No meetings yet",
             "Select a meeting",
             "Archive scope",
-            "UNAVAILABLE",
+            "READY",
         ] {
             assert!(rendered.contains(content), "missing content: {content}");
         }

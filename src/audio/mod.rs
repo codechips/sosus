@@ -3,7 +3,9 @@
 mod level;
 mod mic;
 mod permission;
+mod recording;
 mod tap;
-// The source-independent sink lands before the capture sources that consume it.
-#[allow(dead_code)]
 mod wav;
+
+pub(crate) use permission::ensure_capture_permissions;
+pub(crate) use recording::RecordingSession;

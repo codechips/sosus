@@ -218,7 +218,8 @@ Use these crates at these versions or later compatible releases. Do not substitu
 | Chat input | `tui-textarea` | latest | Multi-line composer with editing |
 | Async runtime | `tokio` | 1.x | `rt-multi-thread`, `sync`, `time`, `signal`, `macros` |
 | System audio | `objc2-core-audio` | 0.3.2 | Raw Core Audio tap C API. See [§13.1](#131-core-audio-taps) |
-| Microphone | `cpal` | 0.15+ | Input stream only |
+| Microphone | `cpal` | 0.18.2 | Input stream only; Core Audio backend |
+| Realtime audio queue | `rtrb` | 0.4.0 | Fixed-capacity lock-free SPSC callback boundary |
 | Resampling | `rubato` | 0.15+ | Capture rate to 16 kHz for Whisper |
 | Media decode | `symphonia` | 0.5+ | WAV, MP4, M4A, FLAC, MP3, OGG. Removes any ffmpeg dependency |
 | WAV write | `hound` | 3.x | Archival recording file |
@@ -547,9 +548,9 @@ END;
 
 ### 8.1 Permissions
 
-- **FR-PERM-1** On first run, and before any capture attempt, query TCC status for system audio capture and microphone.
+- **FR-PERM-1** On first run and before microphone capture, query microphone TCC status explicitly. Core Audio exposes no separate AudioCapture preflight API, so creating the process tap is the authoritative system-audio permission check; map its permission-denied result to the same actionable permission flow rather than inferring from samples.
 - **FR-PERM-2** If a permission is missing, present an actionable message naming the exact System Settings panel, and offer to open it. Never begin a recording that cannot produce audio.
-- **FR-PERM-3** Never infer a permission problem from silent audio. Query the permission API directly. Silence detection is a separate, non-fatal quality warning.
+- **FR-PERM-3** Never infer a permission problem from silent audio. Query microphone status directly and use the Core Audio tap-creation result for system audio. Silence detection is a separate, non-fatal quality warning.
 - **FR-PERM-4** A recording that produces only silence emits a warning after the fact and still keeps the audio file. It must never exit non-zero or discard data.
 
 ### 8.2 Recording
