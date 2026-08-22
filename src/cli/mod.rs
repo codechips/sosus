@@ -92,6 +92,7 @@ pub async fn run() -> anyhow::Result<()> {
                     no_diarize,
                     min_speakers,
                     max_speakers,
+                    existing_meeting: None,
                 },
             )
             .await
@@ -109,6 +110,7 @@ struct TranscribeInvocation<'a> {
     no_diarize: bool,
     min_speakers: Option<usize>,
     max_speakers: Option<usize>,
+    existing_meeting: Option<i64>,
 }
 
 async fn run_transcribe(
@@ -123,6 +125,7 @@ async fn run_transcribe(
         no_diarize,
         min_speakers,
         max_speakers,
+        existing_meeting,
     } = invocation_args;
     let invocation = config::ConfigOverrides {
         config_path: cli.config.clone(),
@@ -173,7 +176,9 @@ async fn run_transcribe(
     let database = db::Database::open(app_paths.database_file())?;
     let started = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
     let started_text = started.format(&Rfc3339)?;
-    let meeting_id =
+    let meeting_id = if let Some(meeting_id) = existing_meeting {
+        meeting_id
+    } else {
         match database
             .writer()
             .execute(db::WriteCommand::InsertMeeting(db::NewMeeting {
@@ -190,7 +195,8 @@ async fn run_transcribe(
             }))? {
             db::WriteResult::Inserted(id) => id,
             other => bail!("unexpected database result while creating meeting: {other:?}"),
-        };
+        }
+    };
     let mut skipped = vec![
         pipeline::Stage::Summarize,
         pipeline::Stage::Export,
@@ -578,6 +584,24 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
         other => bail!("unexpected database result while saving recording: {other:?}"),
     };
     database.shutdown().context("shut down database writer")?;
+
+    if let Err(error) = run_transcribe(
+        cli,
+        TranscribeInvocation {
+            file: &outcome.path,
+            backend: None,
+            language: None,
+            threads: None,
+            no_diarize: false,
+            min_speakers: None,
+            max_speakers: None,
+            existing_meeting: Some(meeting_id),
+        },
+    )
+    .await
+    {
+        eprintln!("warning: post-recording pipeline failed: {error:#}");
+    }
 
     println!(
         "Saved meeting {meeting_id}: {} ({:.1}s)",
