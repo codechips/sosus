@@ -649,7 +649,12 @@ impl App {
         } else if self.show_help {
             render_help(frame, centered_rect(64, 68, area));
         } else if let Some(picker) = &self.picker {
-            render_picker(frame, &picker.modal, centered_rect(58, 72, area));
+            let height = if matches!(picker.kind, PickerType::Model) {
+                54
+            } else {
+                72
+            };
+            render_picker(frame, &picker.modal, centered_rect(64, height, area));
         } else if let Some(settings) = &self.settings {
             render_settings(frame, settings, centered_rect(58, 78, area));
         } else if self.confirm_quit_processing {
@@ -1223,12 +1228,18 @@ fn render_picker(frame: &mut Frame<'_>, picker: &modals::picker::PickerModal, ar
         Line::from(""),
     ];
     for (index, item) in visible.into_iter().take(14).enumerate() {
-        let line = Line::from(format!("{}  {}", item.label, item.detail));
+        let line = Line::from(item.label.clone());
         content.push(if index == picker.selected_index() {
             line.style(theme::selected_row())
         } else {
             line.style(theme::primary_text())
         });
+        if !item.detail.is_empty() {
+            content.push(Line::styled(
+                format!("  {}", item.detail),
+                theme::secondary_text(),
+            ));
+        }
     }
     if content.len() == 2 {
         content.push(Line::styled("No matches", theme::secondary_text()));
