@@ -344,6 +344,33 @@ pub(super) fn pipeline_stage(
         .optional()
 }
 
+pub(super) fn pipeline_stages(
+    connection: &Connection,
+    meeting_id: i64,
+) -> rusqlite::Result<Vec<PipelineStage>> {
+    let mut statement = connection.prepare(
+        "SELECT meeting_id, stage, status, attempt, input_fingerprint, implementation_id,
+                started_at, completed_at, error_code
+         FROM pipeline_stages WHERE meeting_id = ?1 ORDER BY CASE stage
+           WHEN 'transcribe' THEN 0 WHEN 'diarize' THEN 1 WHEN 'summarize' THEN 2
+           WHEN 'export' THEN 3 WHEN 'index' THEN 4 ELSE 5 END",
+    )?;
+    let rows = statement.query_map([meeting_id], |row| {
+        Ok(PipelineStage {
+            meeting_id: row.get(0)?,
+            stage: row.get(1)?,
+            status: row.get(2)?,
+            attempt: row.get(3)?,
+            input_fingerprint: row.get(4)?,
+            implementation_id: row.get(5)?,
+            started_at: row.get(6)?,
+            completed_at: row.get(7)?,
+            error_code: row.get(8)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub(super) fn delete_meeting(connection: &Connection, id: i64) -> rusqlite::Result<bool> {
     Ok(connection.execute(DELETE_MEETING, params![id])? == 1)
 }

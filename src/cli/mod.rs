@@ -65,6 +65,11 @@ enum Command {
         #[arg(long, value_name = "N")]
         max_speakers: Option<usize>,
     },
+    /// Recover interrupted work and resume processing a saved meeting.
+    Resume {
+        /// Database meeting id to resume.
+        meeting: i64,
+    },
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -97,9 +102,85 @@ pub async fn run() -> anyhow::Result<()> {
             )
             .await
         }
+        Some(Command::Resume { meeting }) => run_resume(&cli, meeting).await,
         None if io::stdin().is_terminal() && io::stdout().is_terminal() => run_tui(&cli).await,
         None => print_help(),
     }
+}
+
+async fn run_resume(cli: &Cli, meeting_id: i64) -> anyhow::Result<()> {
+    let defaults = paths::AppPaths::resolve(None, None, cli.output_dir.as_deref())?;
+    let environment = config::EnvironmentOverrides::from_process();
+    let invocation = config::ConfigOverrides {
+        config_path: cli.config.clone(),
+        data_dir: cli.data_dir.clone(),
+        output_dir: cli.output_dir.clone(),
+        ..config::ConfigOverrides::default()
+    };
+    let effective = config::load_effective(
+        defaults.config_file(),
+        defaults.data_dir(),
+        &environment,
+        &invocation,
+    )?;
+    let app_paths = paths::AppPaths::resolve(
+        Some(&effective.locations.config_path),
+        Some(&effective.locations.data_dir),
+        Some(&effective.effective.output.dir),
+    )?;
+    app_paths.ensure_base_directories()?;
+    logging::initialize(app_paths.log_dir())?;
+    let database = db::Database::open(app_paths.database_file())?;
+    let recovered = database
+        .writer()
+        .execute(db::WriteCommand::RecoverInterruptedStages {
+            meeting_id: Some(meeting_id),
+        })?;
+    let reader = database.reader()?;
+    let meeting = reader
+        .meeting(meeting_id)?
+        .with_context(|| format!("meeting {meeting_id} was not found"))?;
+    let stages = reader.pipeline_stages(meeting_id)?;
+    let audio_path = meeting
+        .audio_path
+        .clone()
+        .with_context(|| format!("meeting {meeting_id} has no source audio path"))?;
+    let incomplete = stages.iter().any(|stage| {
+        matches!(
+            stage.status.as_str(),
+            "pending" | "failed" | "cancelled" | "running"
+        )
+    });
+    drop(reader);
+    database.shutdown()?;
+
+    if let db::WriteResult::Recovered(count) = recovered {
+        if count > 0 {
+            eprintln!("Recovered {count} interrupted pipeline stage(s).");
+        }
+    }
+    if !incomplete {
+        println!("Meeting {meeting_id} has no resumable pipeline work.");
+        return Ok(());
+    }
+
+    eprintln!(
+        "Resuming meeting {meeting_id} from {audio_path}. The current file pipeline replays transcription and diarization from the saved source."
+    );
+    run_transcribe(
+        cli,
+        TranscribeInvocation {
+            file: Path::new(&audio_path),
+            backend: None,
+            language: None,
+            threads: None,
+            no_diarize: false,
+            min_speakers: None,
+            max_speakers: None,
+            existing_meeting: Some(meeting_id),
+        },
+    )
+    .await
 }
 
 struct TranscribeInvocation<'a> {

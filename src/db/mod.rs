@@ -145,6 +145,10 @@ impl DatabaseReader {
         )?)
     }
 
+    pub fn pipeline_stages(&self, meeting_id: i64) -> Result<Vec<PipelineStage>, DatabaseError> {
+        Ok(queries::pipeline_stages(&self.connection, meeting_id)?)
+    }
+
     pub fn connection_settings(&self) -> Result<(bool, String), DatabaseError> {
         Ok(queries::connection_settings(&self.connection)?)
     }
