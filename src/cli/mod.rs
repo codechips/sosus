@@ -11,20 +11,20 @@ use clap::{CommandFactory, Parser, Subcommand};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::time::{Duration, MissedTickBehavior};
 
-use crate::{asr, audio, config, db, diarize, export, logging, models, paths, pipeline};
+use crate::{asr, audio, config, diarize, export, logging, models, paths, pipeline};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "sosus",
     version,
-    about = "Local-first meeting intelligence for macOS"
+    about = "Local-first meeting recording and transcription for macOS"
 )]
 struct Cli {
     /// Use this configuration file for the invocation.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// Override the model, database, and log directory.
+    /// Override the model and log directory.
     #[arg(long, global = true, value_name = "PATH")]
     data_dir: Option<PathBuf>,
 
@@ -72,8 +72,8 @@ enum Command {
     },
     /// Recover interrupted work and resume processing a saved meeting.
     Resume {
-        /// Database meeting id to resume.
-        meeting: i64,
+        /// Meeting folder or recording file to resume.
+        meeting: PathBuf,
     },
 }
 
@@ -103,12 +103,11 @@ pub async fn run() -> anyhow::Result<()> {
                     min_speakers,
                     max_speakers,
                     existing_meeting: None,
-                    source: "file",
                 },
             )
             .await
         }
-        Some(Command::Resume { meeting }) => run_resume(&cli, meeting).await,
+        Some(Command::Resume { ref meeting }) => run_resume(&cli, meeting).await,
         Some(Command::Import { ref file }) => {
             run_transcribe(
                 &cli,
@@ -121,7 +120,6 @@ pub async fn run() -> anyhow::Result<()> {
                     min_speakers: None,
                     max_speakers: None,
                     existing_meeting: None,
-                    source: "import",
                 },
             )
             .await
@@ -131,7 +129,7 @@ pub async fn run() -> anyhow::Result<()> {
     }
 }
 
-async fn run_resume(cli: &Cli, meeting_id: i64) -> anyhow::Result<()> {
+async fn run_resume(cli: &Cli, meeting: &Path) -> anyhow::Result<()> {
     let defaults = paths::AppPaths::resolve(None, None, cli.output_dir.as_deref())?;
     let environment = config::EnvironmentOverrides::from_process();
     let invocation = config::ConfigOverrides {
@@ -152,56 +150,26 @@ async fn run_resume(cli: &Cli, meeting_id: i64) -> anyhow::Result<()> {
         Some(&effective.effective.output.dir),
     )?;
     app_paths.ensure_base_directories()?;
-    let database = db::Database::open(app_paths.database_file())?;
-    let recovered = database
-        .writer()
-        .execute(db::WriteCommand::RecoverInterruptedStages {
-            meeting_id: Some(meeting_id),
-        })?;
-    let reader = database.reader()?;
-    let meeting = reader
-        .meeting(meeting_id)?
-        .with_context(|| format!("meeting {meeting_id} was not found"))?;
-    let stages = reader.pipeline_stages(meeting_id)?;
-    let audio_path = meeting
-        .audio_path
-        .clone()
-        .with_context(|| format!("meeting {meeting_id} has no source audio path"))?;
-    let incomplete = stages.is_empty()
-        || stages.iter().any(|stage| {
-            matches!(
-                stage.status.as_str(),
-                "pending" | "failed" | "cancelled" | "running"
-            )
-        });
-    drop(reader);
-    database.shutdown()?;
-
-    if let db::WriteResult::Recovered(count) = recovered {
-        if count > 0 {
-            eprintln!("Recovered {count} interrupted pipeline stage(s).");
-        }
+    let audio_path = if meeting.is_dir() {
+        meeting.join("recording.wav")
+    } else {
+        meeting.to_path_buf()
+    };
+    if !audio_path.is_file() {
+        bail!("recording file was not found: {}", audio_path.display());
     }
-    if !incomplete {
-        println!("Meeting {meeting_id} has no resumable pipeline work.");
-        return Ok(());
-    }
-
-    eprintln!(
-        "Resuming meeting {meeting_id} from {audio_path}. The current file pipeline replays transcription and diarization from the saved source."
-    );
+    eprintln!("Resuming from {}.", audio_path.display());
     run_transcribe(
         cli,
         TranscribeInvocation {
-            file: Path::new(&audio_path),
+            file: &audio_path,
             backend: None,
             language: None,
             threads: None,
             no_diarize: false,
             min_speakers: None,
             max_speakers: None,
-            existing_meeting: Some(meeting_id),
-            source: "file",
+            existing_meeting: Some(audio_path.parent().unwrap_or(Path::new(".")).to_path_buf()),
         },
     )
     .await
@@ -215,8 +183,7 @@ struct TranscribeInvocation<'a> {
     no_diarize: bool,
     min_speakers: Option<usize>,
     max_speakers: Option<usize>,
-    existing_meeting: Option<i64>,
-    source: &'a str,
+    existing_meeting: Option<PathBuf>,
 }
 
 async fn run_transcribe(
@@ -232,7 +199,6 @@ async fn run_transcribe(
         min_speakers,
         max_speakers,
         existing_meeting,
-        source,
     } = invocation_args;
     let invocation = config::ConfigOverrides {
         config_path: cli.config.clone(),
@@ -279,36 +245,14 @@ async fn run_transcribe(
         0 => num_cpus::get_physical().max(1),
         configured => configured,
     };
-    let database = db::Database::open(app_paths.database_file())?;
     let started = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
     let started_text = started.format(&Rfc3339)?;
-    let meeting_id = if let Some(meeting_id) = existing_meeting {
-        meeting_id
-    } else {
-        match database
-            .writer()
-            .execute(db::WriteCommand::InsertMeeting(db::NewMeeting {
-                started_at: started_text.clone(),
-                ended_at: None,
-                title: None,
-                duration_s: audio.duration_seconds(),
-                language: effective.effective.transcription.language.clone(),
-                audio_path: Some(file.to_string_lossy().into_owned()),
-                audio_owned: false,
-                source: source.to_owned(),
-                speaker_count: 0,
-                created_at: started_text.clone(),
-            }))? {
-            db::WriteResult::Inserted(id) => id,
-            other => bail!("unexpected database result while creating meeting: {other:?}"),
-        }
-    };
-    let mut skipped = vec![pipeline::Stage::Index];
+    let artifact_dir = existing_meeting.unwrap_or(app_paths.create_meeting_dir(started)?);
+    let mut skipped = vec![pipeline::Stage::Summarize, pipeline::Stage::Index];
     if !effective.effective.diarization.enabled {
         skipped.push(pipeline::Stage::Diarize);
     }
     let mut pipeline_state = pipeline::PipelineState::new(&skipped);
-    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
     let input_fingerprint = file_fingerprint(file)?;
     pipeline_state.begin(
         pipeline::Stage::Transcribe,
@@ -316,15 +260,12 @@ async fn run_transcribe(
         capabilities.id,
         &started_text,
     )?;
-    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
     let mut transcriber = asr::create_transcriber(backend);
     if let Err(error) = transcriber.prepare(&asr::PrepareOptions {
         model_dir,
         threads: thread_count,
     }) {
         pipeline_state.fail(pipeline::Stage::Transcribe, "initialization")?;
-        persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
-        let _ = database.shutdown();
         return Err(anyhow::anyhow!(error)).context("could not initialize transcription");
     }
     let language = (!effective.effective.transcription.language.is_empty())
@@ -342,16 +283,12 @@ async fn run_transcribe(
         Ok(result) => result,
         Err(error) => {
             pipeline_state.fail(pipeline::Stage::Transcribe, "runtime")?;
-            persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
-            let _ = database.shutdown();
             return Err(anyhow::anyhow!(error)).context("transcription failed");
         }
     };
     pipeline_state.complete(pipeline::Stage::Transcribe, &started_text)?;
-    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
 
     let mut result = result;
-    let mut speaker_count = 0_usize;
     if effective.effective.diarization.enabled {
         pipeline_state.begin(
             pipeline::Stage::Diarize,
@@ -359,7 +296,6 @@ async fn run_transcribe(
             "sherpa-onnx-diarization-1",
             &started_text,
         )?;
-        persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
         let model_dirs = match models::ensure_diarization_model(
             "diarization-segmentation",
             app_paths.model_dir(),
@@ -377,7 +313,6 @@ async fn run_transcribe(
                 Ok(embedding_dir) => Some((segmentation_dir, embedding_dir)),
                 Err(error) => {
                     pipeline_state.fail(pipeline::Stage::Diarize, "model_prepare")?;
-                    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
                     eprintln!(
                         "warning: diarization model preparation failed; transcript is undiarized: {error}"
                     );
@@ -386,7 +321,6 @@ async fn run_transcribe(
             },
             Err(error) => {
                 pipeline_state.fail(pipeline::Stage::Diarize, "model_prepare")?;
-                persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
                 eprintln!(
                     "warning: diarization model preparation failed; transcript is undiarized: {error}"
                 );
@@ -408,9 +342,7 @@ async fn run_transcribe(
                     Ok(diarization) => {
                         let assignment =
                             diarize::assign_speakers(&mut result, &diarization.turns, false);
-                        speaker_count = assignment.speaker_count;
                         pipeline_state.complete(pipeline::Stage::Diarize, &started_text)?;
-                        persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
                         eprintln!(
                             "Diarization complete: {} speaker(s).",
                             assignment.speaker_count
@@ -418,49 +350,14 @@ async fn run_transcribe(
                     }
                     Err(error) => {
                         pipeline_state.fail(pipeline::Stage::Diarize, "runtime")?;
-                        persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
                         eprintln!("warning: diarization failed; transcript is undiarized: {error}")
                     }
                 },
                 Err(error) => {
                     pipeline_state.fail(pipeline::Stage::Diarize, "initialization")?;
-                    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
                     eprintln!("warning: diarization failed; transcript is undiarized: {error}")
                 }
             }
-        }
-    }
-
-    let (summary_title, summary_body) = build_summary(&result);
-    pipeline_state.begin(
-        pipeline::Stage::Summarize,
-        &format!("{input_fingerprint}:deterministic-v1"),
-        "deterministic-summary-v1",
-        &started_text,
-    )?;
-    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
-    let artifact_dir = file.parent().unwrap_or_else(|| Path::new("."));
-    let summary_path = artifact_dir.join("summary.md");
-    if let Err(error) = export::write_summary(&summary_path, &summary_title, &summary_body) {
-        pipeline_state.fail(pipeline::Stage::Summarize, "artifact")?;
-        persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
-        eprintln!("warning: summary artifact was not saved: {error}");
-    } else {
-        let summary_save = database.writer().execute(db::WriteCommand::InsertSummary {
-            meeting_id,
-            template: "deterministic".to_owned(),
-            body: summary_body.clone(),
-            model: "deterministic-v1".to_owned(),
-            created_at: started_text.clone(),
-        });
-        if let Err(error) = summary_save {
-            pipeline_state.fail(pipeline::Stage::Summarize, "database")?;
-            persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
-            eprintln!("warning: summary was not saved to the database: {error}");
-        } else {
-            pipeline_state.complete(pipeline::Stage::Summarize, &started_text)?;
-            persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
-            eprintln!("Saved summary: {}", summary_path.display());
         }
     }
 
@@ -470,7 +367,6 @@ async fn run_transcribe(
         "markdown-export-v1",
         &started_text,
     )?;
-    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
     for segment in &result.segments {
         if let Some(speaker) = &segment.speaker {
             println!("{speaker}: {}", segment.text);
@@ -500,106 +396,7 @@ async fn run_transcribe(
         }
     }
     pipeline_state.complete(pipeline::Stage::Export, &started_text)?;
-    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
 
-    let transcript_save = database
-        .writer()
-        .execute(db::WriteCommand::InsertTranscript {
-            meeting_id,
-            transcript: result,
-            speaker_count,
-        });
-    if let Err(error) = transcript_save {
-        eprintln!("warning: transcript was not saved to the database: {error}");
-    } else {
-        eprintln!("Saved meeting {meeting_id} to the database.");
-    }
-    if let Err(error) = database.shutdown() {
-        eprintln!("warning: database shutdown failed: {error}");
-    }
-    Ok(())
-}
-
-fn build_summary(result: &asr::TranscriptResult) -> (String, String) {
-    let first_words = result
-        .segments
-        .iter()
-        .flat_map(|segment| segment.text.split_whitespace())
-        .take(8)
-        .collect::<Vec<_>>();
-    let title = if first_words.is_empty() {
-        "Meeting summary".to_owned()
-    } else {
-        format!(
-            "{}{}",
-            first_words.join(" "),
-            if first_words.len() == 8 { "…" } else { "" }
-        )
-    };
-    let body = if result.segments.is_empty() {
-        "No speech was detected.".to_owned()
-    } else {
-        let speaker_count = result
-            .segments
-            .iter()
-            .filter_map(|segment| segment.speaker.as_deref())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
-        format!(
-            "## Overview\n\n- Duration: {:.1}s\n- Segments: {}\n- Speakers: {}\n- Language: {}\n\nSemantic meeting notes are not generated yet.",
-            result.duration_seconds,
-            result.segments.len(),
-            speaker_count,
-            if result.language.is_empty() {
-                "unknown"
-            } else {
-                &result.language
-            },
-        )
-    };
-    (title, body)
-}
-
-fn persist_pipeline_state(
-    database: &db::Database,
-    meeting_id: i64,
-    state: &pipeline::PipelineState,
-) -> anyhow::Result<()> {
-    for stage in state.stages() {
-        let status = match stage.status {
-            pipeline::StageStatus::Pending => "pending",
-            pipeline::StageStatus::Running => "running",
-            pipeline::StageStatus::Completed => "completed",
-            pipeline::StageStatus::Failed => "failed",
-            pipeline::StageStatus::Cancelled => "cancelled",
-            pipeline::StageStatus::Skipped => "skipped",
-        };
-        let stage_name = match stage.stage {
-            pipeline::Stage::Transcribe => "transcribe",
-            pipeline::Stage::Diarize => "diarize",
-            pipeline::Stage::Summarize => "summarize",
-            pipeline::Stage::Export => "export",
-            pipeline::Stage::Index => "index",
-        };
-        match database
-            .writer()
-            .execute(db::WriteCommand::UpsertPipelineStage(
-                db::PipelineStageUpdate {
-                    meeting_id,
-                    stage: stage_name.to_owned(),
-                    status: status.to_owned(),
-                    attempt: i64::from(stage.attempt),
-                    input_fingerprint: stage.input_fingerprint.clone(),
-                    implementation_id: stage.implementation_id.clone(),
-                    started_at: stage.started_at.clone(),
-                    completed_at: stage.completed_at.clone(),
-                    error_code: stage.error_code.clone(),
-                },
-            ))? {
-            db::WriteResult::Updated(true) => {}
-            other => bail!("unexpected database result while saving pipeline state: {other:?}"),
-        }
-    }
     Ok(())
 }
 
@@ -691,7 +488,6 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
     )?;
     app_paths.ensure_base_directories()?;
     logging::initialize(app_paths.log_dir())?;
-    paths::ensure_private_file(app_paths.database_file())?;
 
     for warning in &effective.warnings {
         eprintln!("warning: {warning}");
@@ -738,30 +534,6 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
         return Err(error).context("recording stopped because system audio failed");
     }
 
-    let ended_at = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-    let started_at_text = started_at.format(&Rfc3339)?;
-    let ended_at_text = ended_at.format(&Rfc3339)?;
-    let database = db::Database::open(app_paths.database_file())?;
-    let result = database
-        .writer()
-        .execute(db::WriteCommand::InsertMeeting(db::NewMeeting {
-            started_at: started_at_text.clone(),
-            ended_at: Some(ended_at_text),
-            title: None,
-            duration_s: outcome.duration_seconds,
-            language: effective.effective.transcription.language.clone(),
-            audio_path: Some(outcome.path.to_string_lossy().into_owned()),
-            audio_owned: true,
-            source: "recording".to_owned(),
-            speaker_count: 0,
-            created_at: started_at_text,
-        }))?;
-    let meeting_id = match result {
-        db::WriteResult::Inserted(id) => id,
-        other => bail!("unexpected database result while saving recording: {other:?}"),
-    };
-    database.shutdown().context("shut down database writer")?;
-
     if let Err(error) = run_transcribe(
         cli,
         TranscribeInvocation {
@@ -772,8 +544,13 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
             no_diarize: false,
             min_speakers: None,
             max_speakers: None,
-            existing_meeting: Some(meeting_id),
-            source: "recording",
+            existing_meeting: Some(
+                outcome
+                    .path
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .to_path_buf(),
+            ),
         },
     )
     .await
@@ -782,7 +559,7 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
     }
 
     println!(
-        "Saved meeting {meeting_id}: {} ({:.1}s)",
+        "Saved recording: {} ({:.1}s)",
         outcome.path.display(),
         outcome.duration_seconds
     );
@@ -836,18 +613,10 @@ async fn run_tui(cli: &Cli) -> anyhow::Result<()> {
     )?;
     app_paths.ensure_base_directories()?;
     logging::initialize(app_paths.log_dir())?;
-    paths::ensure_private_file(app_paths.database_file())?;
-
-    let database = db::Database::open(app_paths.database_file())?;
-    let reader = database.reader()?;
-    let (foreign_keys, journal_mode) = reader.connection_settings()?;
     tracing::info!(
         event = "startup",
         status = "ready",
         backend = ?effective.effective.transcription.backend,
-        schema_version = db::LATEST_SCHEMA_VERSION,
-        foreign_keys,
-        journal_mode,
     );
 
     let startup = crate::tui::Startup {
@@ -859,14 +628,9 @@ async fn run_tui(cli: &Cli) -> anyhow::Result<()> {
             .collect(),
         recording: Some(crate::tui::RecordingStartup {
             app_paths: app_paths.clone(),
-            database_writer: database.writer(),
-            language: effective.effective.transcription.language,
         }),
-        database_reader: Some(reader),
     };
-    let result = crate::tui::run(startup).await;
-    let shutdown = database.shutdown().context("shut down database writer");
-    result.and(shutdown)
+    crate::tui::run(startup).await
 }
 
 fn print_help() -> anyhow::Result<()> {
@@ -884,33 +648,5 @@ mod tests {
     #[test]
     fn clap_definition_is_valid() {
         Cli::command().debug_assert();
-    }
-
-    #[test]
-    fn deterministic_summary_is_concise_and_handles_silence() {
-        let empty = asr::TranscriptResult {
-            language: "en".to_owned(),
-            duration_seconds: 1.0,
-            segments: Vec::new(),
-        };
-        let (title, body) = build_summary(&empty);
-        assert_eq!(title, "Meeting summary");
-        assert_eq!(body, "No speech was detected.");
-
-        let transcript = asr::TranscriptResult {
-            language: "en".to_owned(),
-            duration_seconds: 1.0,
-            segments: vec![asr::Segment {
-                start_seconds: 0.0,
-                end_seconds: 1.0,
-                text: "one two three four five six seven eight nine".to_owned(),
-                words: Vec::new(),
-                speaker: None,
-            }],
-        };
-        let (title, body) = build_summary(&transcript);
-        assert_eq!(title, "one two three four five six seven eight…");
-        assert!(body.contains("Segments: 1"));
-        assert!(!body.contains("one two three four"));
     }
 }

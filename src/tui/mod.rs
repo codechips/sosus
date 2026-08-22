@@ -32,17 +32,14 @@ use ratatui::{
     text::{Line, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::OffsetDateTime;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 
 use crate::{
+    archive::{self, Meeting, Segment},
     audio,
-    db::{
-        DatabaseReader, DatabaseWriter, Meeting, NewMeeting, Segment, Summary, WriteCommand,
-        WriteResult,
-    },
     paths::AppPaths,
     pipeline::{self, AppEvent as PipelineEvent},
 };
@@ -55,17 +52,11 @@ static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 enum Focus {
     Meetings,
     Transcript,
-    Chat,
     Recording,
 }
 
 impl Focus {
-    const ALL: [Self; 4] = [
-        Self::Meetings,
-        Self::Transcript,
-        Self::Chat,
-        Self::Recording,
-    ];
+    const ALL: [Self; 3] = [Self::Meetings, Self::Transcript, Self::Recording];
 
     fn next(self) -> Self {
         let index = Self::ALL
@@ -103,10 +94,8 @@ struct App {
     recording: Option<ActiveRecording>,
     last_recording: Option<String>,
     pipeline_status: Option<String>,
-    database_reader: Option<DatabaseReader>,
     meetings: Vec<Meeting>,
     selected_meeting: usize,
-    summary: Option<Summary>,
     transcript: Vec<Segment>,
     transcript_scroll: u16,
     input_levels: Option<(f32, f32)>,
@@ -127,10 +116,8 @@ impl App {
             recording: None,
             last_recording: None,
             pipeline_status: None,
-            database_reader: startup.database_reader,
             meetings: Vec::new(),
             selected_meeting: 0,
-            summary: None,
             transcript: Vec::new(),
             transcript_scroll: 0,
             input_levels: None,
@@ -138,20 +125,15 @@ impl App {
     }
 
     fn refresh_archive(&mut self) {
-        let Some(reader) = &self.database_reader else {
-            return;
-        };
-        if let Ok(meetings) = reader.meetings(20) {
+        if let Ok(meetings) = archive::discover(std::path::Path::new(&self.archive_dir)) {
             self.meetings = meetings;
             self.selected_meeting = self
                 .selected_meeting
                 .min(self.meetings.len().saturating_sub(1));
             if let Some(meeting) = self.meetings.get(self.selected_meeting) {
-                self.summary = reader.latest_summary(meeting.id).ok().flatten();
-                self.transcript = reader.segments(meeting.id).unwrap_or_default();
+                self.transcript = meeting.transcript.clone();
                 self.transcript_scroll = 0;
             } else {
-                self.summary = None;
                 self.transcript.clear();
                 self.transcript_scroll = 0;
             }
@@ -168,12 +150,9 @@ impl App {
         } else {
             (self.selected_meeting + delta as usize).min(last)
         };
-        if let Some(reader) = &self.database_reader {
-            if let Some(meeting) = self.meetings.get(self.selected_meeting) {
-                self.summary = reader.latest_summary(meeting.id).ok().flatten();
-                self.transcript = reader.segments(meeting.id).unwrap_or_default();
-                self.transcript_scroll = 0;
-            }
+        if let Some(meeting) = self.meetings.get(self.selected_meeting) {
+            self.transcript = meeting.transcript.clone();
+            self.transcript_scroll = 0;
         }
     }
 
@@ -249,7 +228,6 @@ impl App {
         let session = audio::RecordingSession::start(meeting_dir.join("recording.wav"))?;
         self.recording = Some(ActiveRecording {
             session,
-            started_at,
             meeting_dir,
         });
         self.input_levels = Some((0.0, 0.0));
@@ -257,54 +235,30 @@ impl App {
         Ok(())
     }
 
-    fn stop_recording(&mut self) -> anyhow::Result<Option<(PathBuf, i64)>> {
+    fn stop_recording(&mut self) -> anyhow::Result<Option<PathBuf>> {
         let Some(active) = self.recording.take() else {
             return Ok(None);
         };
         self.input_levels = None;
-        let context = self
-            .recording_context
+        self.recording_context
             .as_ref()
             .context("recording is not configured")?;
         let outcome = active.session.finish()?;
-        let ended_at = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-        let started_at_text = active.started_at.format(&Rfc3339)?;
-        let result = context
-            .database_writer
-            .execute(WriteCommand::InsertMeeting(NewMeeting {
-                started_at: started_at_text.clone(),
-                ended_at: Some(ended_at.format(&Rfc3339)?),
-                title: None,
-                duration_s: outcome.duration_seconds,
-                language: context.language.clone(),
-                audio_path: Some(outcome.path.to_string_lossy().into_owned()),
-                audio_owned: true,
-                source: "recording".to_owned(),
-                speaker_count: 0,
-                created_at: started_at_text,
-            }))?;
-        let meeting_id = match result {
-            WriteResult::Inserted(id) => id,
-            other => anyhow::bail!("unexpected database result while saving recording: {other:?}"),
-        };
-
         self.last_recording = Some(active.meeting_dir.display().to_string());
         self.message = Some(format!(
-            "Saved meeting {meeting_id} ({:.1}s)",
+            "Saved recording ({:.1}s)",
             outcome.duration_seconds
         ));
         if outcome.system_dropouts > 0 || outcome.microphone_dropouts > 0 {
             self.message = Some(format!(
-                "Saved meeting {meeting_id}; dropouts system={}, mic={}",
+                "Saved recording; dropouts system={}, mic={}",
                 outcome.system_dropouts, outcome.microphone_dropouts
             ));
         }
         if outcome.microphone_failed {
-            self.message = Some(format!(
-                "Saved meeting {meeting_id}; microphone stream was lost"
-            ));
+            self.message = Some("Saved recording; microphone stream was lost".to_owned());
         }
-        Ok(Some((outcome.path, meeting_id)))
+        Ok(Some(outcome.path))
     }
 
     fn pump_recording(&mut self) -> anyhow::Result<()> {
@@ -354,11 +308,7 @@ impl App {
             .split(area);
         let right = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(30),
-                Constraint::Percentage(20),
-            ])
+            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
             .split(columns[2]);
 
         panes::meetings::render(
@@ -373,14 +323,12 @@ impl App {
             frame,
             columns[1],
             self.focus == Focus::Transcript,
-            self.summary.as_ref(),
             &self.transcript,
             self.transcript_scroll,
         );
-        panes::chat::render(frame, right[0], self.focus == Focus::Chat);
         panes::recording::render(
             frame,
-            right[1],
+            right[0],
             self.focus == Focus::Recording,
             self.recording
                 .as_ref()
@@ -388,7 +336,7 @@ impl App {
             self.last_recording.as_deref(),
             self.input_levels,
         );
-        widgets::progress::render(frame, right[2], self.pipeline_status.as_deref());
+        widgets::progress::render(frame, right[1], self.pipeline_status.as_deref());
 
         if let Some(error) = &self.error {
             render_notice(frame, "Error", error, centered_rect(70, 42, area));
@@ -413,18 +361,14 @@ pub struct Startup {
     pub archive_dir: String,
     pub warnings: Vec<String>,
     pub recording: Option<RecordingStartup>,
-    pub database_reader: Option<DatabaseReader>,
 }
 
 pub struct RecordingStartup {
     pub app_paths: AppPaths,
-    pub database_writer: DatabaseWriter,
-    pub language: String,
 }
 
 struct ActiveRecording {
     session: audio::RecordingSession,
-    started_at: OffsetDateTime,
     meeting_dir: PathBuf,
 }
 
@@ -471,8 +415,8 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                         match app.handle_key(key) {
                             Some(AppAction::ToggleRecording) if app.recording.is_some() => {
                                 match app.stop_recording() {
-                                    Ok(Some((_, meeting_id))) => {
-                                        launch_pipeline(&app, meeting_id, &pipeline_tx)
+                                    Ok(Some(path)) => {
+                                        launch_pipeline(&app, path, &pipeline_tx)
                                     }
                                     Ok(None) => {}
                                     Err(error) => app.error = Some(format!("{error:#}")),
@@ -485,8 +429,8 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                             }
                             Some(AppAction::StopRecording) => {
                                 match app.stop_recording() {
-                                    Ok(Some((_, meeting_id))) => {
-                                        launch_pipeline(&app, meeting_id, &pipeline_tx)
+                                    Ok(Some(path)) => {
+                                        launch_pipeline(&app, path, &pipeline_tx)
                                     }
                                     Ok(None) => {}
                                     Err(error) => app.error = Some(format!("{error:#}")),
@@ -535,20 +479,21 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
     Ok(())
 }
 
-fn launch_pipeline(app: &App, meeting_id: i64, events: &mpsc::UnboundedSender<PipelineEvent>) {
+fn launch_pipeline(
+    app: &App,
+    recording_path: PathBuf,
+    events: &mpsc::UnboundedSender<PipelineEvent>,
+) {
     let Some(context) = &app.recording_context else {
         return;
     };
-    let data_dir = context.app_paths.data_dir().to_path_buf();
     let output_dir = context.app_paths.output_dir().to_path_buf();
     let events = events.clone();
     tokio::spawn(async move {
         let _ = events.send(PipelineEvent::WorkStarted);
         let result = TokioCommand::new(std::env::current_exe().expect("current executable"))
             .args(["resume"])
-            .arg(meeting_id.to_string())
-            .args(["--data-dir"])
-            .arg(data_dir)
+            .arg(recording_path)
             .args(["--output-dir"])
             .arg(output_dir)
             .stdout(std::process::Stdio::null())
@@ -568,7 +513,7 @@ fn launch_pipeline(app: &App, meeting_id: i64, events: &mpsc::UnboundedSender<Pi
                     Some("Transcribing")
                 } else if line.starts_with("Diarizing ") {
                     Some("Diarizing")
-                } else if line.starts_with("Saved summary:") {
+                } else if line.starts_with("Saved transcript:") {
                     Some("Exporting")
                 } else {
                     None
@@ -846,7 +791,6 @@ mod tests {
             archive_dir: "/tmp/sosus-test-recordings".to_owned(),
             warnings: Vec::new(),
             recording: None,
-            database_reader: None,
         })
     }
 
@@ -887,30 +831,14 @@ mod tests {
         let mut app = app();
         app.meetings = vec![
             Meeting {
-                id: 1,
-                started_at: String::new(),
-                ended_at: None,
-                title: None,
-                duration_s: 1.0,
-                language: String::new(),
-                audio_path: None,
-                audio_owned: false,
-                source: "recording".to_owned(),
-                speaker_count: 0,
-                created_at: String::new(),
+                path: PathBuf::from("/tmp/one"),
+                name: "one".to_owned(),
+                transcript: Vec::new(),
             },
             Meeting {
-                id: 2,
-                started_at: String::new(),
-                ended_at: None,
-                title: None,
-                duration_s: 2.0,
-                language: String::new(),
-                audio_path: None,
-                audio_owned: false,
-                source: "recording".to_owned(),
-                speaker_count: 0,
-                created_at: String::new(),
+                path: PathBuf::from("/tmp/two"),
+                name: "two".to_owned(),
+                transcript: Vec::new(),
             },
         ];
         let _ = app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -927,7 +855,6 @@ mod tests {
             archive_dir: "/tmp/sosus-test-recordings".to_owned(),
             warnings: vec!["first".to_owned(), "second".to_owned()],
             recording: None,
-            database_reader: None,
         });
         assert_eq!(app.warnings.front().map(String::as_str), Some("first"));
 
@@ -955,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_size_renders_all_four_panes() {
+    fn normal_size_renders_core_panes() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal should construct");
         terminal
@@ -970,11 +897,9 @@ mod tests {
         for content in [
             "Meetings",
             "Transcript",
-            "Chat",
             "Recording",
             "No meetings yet",
             "Select a meeting",
-            "Not",
             "READY",
         ] {
             assert!(rendered.contains(content), "missing content: {content}");

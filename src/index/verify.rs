@@ -1,1 +1,0 @@
-//! Citation quote verification.

@@ -7,32 +7,16 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::db::{Segment, Summary};
+use crate::archive::Segment;
 use crate::tui::theme;
 
-pub fn render(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    focused: bool,
-    summary: Option<&Summary>,
-    segments: &[Segment],
-    scroll: u16,
-) {
+pub fn render(frame: &mut Frame<'_>, area: Rect, focused: bool, segments: &[Segment], scroll: u16) {
     let title = if focused {
         "▶ Transcript"
     } else {
         "Transcript"
     };
     let mut lines = Vec::new();
-    if let Some(summary) = summary {
-        lines.push(Line::styled("Summary", theme::accent_text()));
-        for line in summary.body.lines() {
-            if !line.is_empty() && !line.starts_with("## ") {
-                lines.push(Line::styled(line, theme::primary_text()));
-            }
-        }
-        lines.push(Line::raw(""));
-    }
     if !segments.is_empty() {
         lines.push(Line::styled("Transcript", theme::accent_text()));
         for segment in segments.iter().take(100) {

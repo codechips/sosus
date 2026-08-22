@@ -2,7 +2,9 @@
 
 **Status:** Ready for M0; later product decisions must be resolved before their affected milestones
 **Version:** 1.7 draft (2026-08-21)
-**Deliverable:** A single signed macOS binary providing a first-class CLI and optional terminal UI to record, transcribe, diarize, summarize, search and chat with meetings, entirely on-device.
+**Deliverable:** A single signed macOS binary providing a first-class CLI and optional terminal UI to record, transcribe, and optionally diarize meetings, entirely on-device.
+
+> **Current scope decision (2026-08-22):** v1 is deliberately limited to recording, transcription, optional diarization, readable Markdown export, optional JSON export, and filesystem-backed archive browsing. Local summaries, semantic search, chat, embeddings, SQLite, and local LLM inference are out of scope. The older sections describing those capabilities are retained as historical design notes only and are not implementation requirements.
 
 > **This document is the authoritative specification.** It is written for an implementing agent working in a **fresh repository with no access to any prior implementation**. Do not invent behaviour that is not stated here. Unresolved technical experiments appear in [§16.1](#161-q6-decision-ladder-pre-agreed-do-not-escalate); unresolved product decisions appear in [§16.2](#162-product-decisions-required-before-implementation) and must be answered by the owner before the affected work begins.
 
@@ -34,11 +36,11 @@
 
 ## 1. Product summary
 
-`sosus` is a local-first meeting intelligence tool for macOS, operated through a first-class CLI with an optional terminal UI. It captures system audio and microphone simultaneously, transcribes with speaker labels, produces structured notes, and lets the user ask natural-language questions across their entire meeting archive with citations back to the source audio timestamps.
+`sosus` is a local-first meeting recorder and transcription tool for macOS, operated through a first-class CLI with an optional terminal UI. It captures system audio and microphone simultaneously, transcribes with optional speaker labels, and writes portable artifacts that can be inspected or supplied to a frontier model outside sosus.
 
 Nothing leaves the machine. The only network access is downloading model weights on first run.
 
-**Primary user:** a technical individual who is in many meetings, wants searchable notes, and will not send recordings to a cloud service.
+**Primary user:** a technical individual who records many meetings, wants trustworthy local transcripts, and chooses separately how to make sense of them.
 
 **Why a TUI:** the optional interactive view makes recording and archive browsing fast without leaving the keyboard. It is a convenience layer, not a requirement for automation or full product access.
 
@@ -54,14 +56,11 @@ Nothing leaves the machine. The only network access is downloading model weights
 | Microphone capture | Simultaneous with system audio, mixed, with live mute toggle |
 | Transcription | **Two selectable backends:** Whisper via whisper.cpp with Metal, and NVIDIA Parakeet TDT via sherpa-onnx |
 | Custom vocabulary | User-managed term list biasing recognition of names, jargon and product terms |
-| Speaker diarization | **Required in v1.** Segment-level speaker labels, no HuggingFace token |
-| Summarization | Structured notes from a local GGUF model, template-driven |
-| Auto-titling | Short generated title used as the meeting's display name |
-| Search | Hybrid keyword and semantic retrieval over the whole archive |
-| Chat | Conversational Q&A, corpus-wide by default, scopable to one meeting |
-| Citations | Every claim traceable to meeting, timestamp and speaker, with verification |
+| Speaker diarization | Optional segment-level speaker labels, no HuggingFace token |
+| Markdown export | Readable timestamped transcript written into the meeting folder |
+| JSON export | Optional machine-readable transcript for external tools and frontier LLM workflows |
 | Import | Ingest existing audio and video files from disk |
-| TUI | Optional four-pane interactive front end: Meetings, Transcript, Chat, Recording |
+| TUI | Optional three-pane interactive front end: Meetings, Transcript, Recording |
 | CLI | First-class non-interactive subcommands and invocation-scoped flags for every durable capability |
 
 ### 2.2 Explicitly out of scope for v1
@@ -186,13 +185,12 @@ For a recording created by sosus, the audio and its portable derived artifacts l
     └── 2026-08-21_1430/
         ├── recording.wav
         ├── transcript.md
-        ├── summary.md
         └── transcript.json   # only when JSON export is enabled
 ```
 
 The meeting folder is created when capture starts, before a generated title exists, and is never renamed. Its name is the local start time in `YYYY-MM-DD_HHMM` form. If that name already exists, append `_2`, `_3`, and so on. Generated titles are display metadata only and never become filesystem names.
 
-Imported meetings use the same meeting-folder pattern for transcripts and summaries, but their source audio remains at its original path and is not copied or deleted. The database records the actual audio location in `meetings.audio_path` and distinguishes owned recordings from imports with `audio_owned`.
+Imported meetings use the same meeting-folder pattern for derived transcripts, while their source audio remains at its original path and is not copied or deleted. The folder name and artifact presence are the archive's metadata; no database is required.
 
 ### 4.5 Public repository requirements
 
@@ -310,14 +308,15 @@ The TUI event loop never blocks. All heavy work runs on dedicated threads and co
 │ → mix → WAV    │   │  fastembed           │   │  streaming tokens    │
 └────────────────┘   └──────────┬───────────┘   └──────────┬───────────┘
                                 │                          │
-                          ┌─────▼──────────────────────────▼─────┐
-                          │  SQLite (single writer, WAL mode)    │
+                          ┌─────▼───────────────────────────────┐
+                          │  Meeting folder artifacts             │
+                          │  recording.wav + transcript.md/json   │
                           └──────────────────────────────────────┘
 ```
 
 - **FR-ARCH-1** UI input latency must stay under 50 ms while transcription, diarization or inference is running. Verify by holding a key during a long transcription; there must be no perceptible lag or dropped frames.
 - **FR-ARCH-2** All cross-thread communication uses typed enums (`AppEvent`, `Command`). No shared mutable state behind a mutex for pipeline data.
-- **FR-ARCH-3** SQLite runs in WAL mode with exactly one writer thread. Readers may be concurrent.
+- **FR-ARCH-3** The filesystem is the source of truth. Meeting folders are discovered by naming convention and artifact presence; no database or background index is required.
 - **FR-ARCH-4** Models load lazily via `OnceCell` or equivalent and stay resident for the process lifetime. Startup must not load any model.
 - **FR-ARCH-5** Native model handles must be released deterministically on shutdown, not left to process teardown.
 
@@ -985,7 +984,7 @@ retention_days    = 0          # 0 = keep forever
 
 ## 11. CLI surface
 
-`sosus` is deliberately dual-mode: the TUI and CLI are two front ends over the same application services and database queries. Core behavior must not be implemented separately in `tui/` and `cli/`.
+`sosus` is deliberately dual-mode: the TUI and CLI are two front ends over the same filesystem-backed recording and transcription services. Core behavior must not be implemented separately in `tui/` and `cli/`.
 
 With no subcommand, launch the TUI only when stdin and stdout are terminals. `sosus tui` always requests the TUI and fails clearly if no interactive terminal is available. Bare `sosus` in a pipe or non-interactive process prints plain help and exits successfully; it never emits terminal control sequences.
 
@@ -995,16 +994,8 @@ With no subcommand, launch the TUI only when stdin and stdout are terminals. `so
 | `sosus tui` | Explicitly launch the TUI |
 | `sosus record` | Record, process, print result paths. No TUI |
 | `sosus transcribe <file>` | Transcribe and diarize a file, write outputs alongside it |
-| `sosus summarize <file>` | Summarize an existing transcript |
-| `sosus ask <question>` | One-shot query, print answer with citations |
-| `sosus import <dir>` | Ingest every supported media file in a directory |
-| `sosus meetings` | List archived meetings newest first |
-| `sosus show <meeting>` | Show one meeting's metadata, summary and transcript path |
-| `sosus search <query>` | Return ranked passages with meeting, speaker and timestamp |
-| `sosus export <meeting>` | Regenerate portable artifacts from stored data |
-| `sosus delete <meeting>` | Preview and delete one meeting according to ownership rules |
-| `sosus resume [meeting]` | Resume interrupted or failed pipeline work |
-| `sosus reindex` | Rebuild search index from stored segments |
+| `sosus import <file>` | Transcribe an existing audio or video file into a meeting folder |
+| `sosus resume <meeting-folder-or-recording>` | Re-run transcription and optional diarization from saved audio |
 | `sosus warmup` | Prefetch all models for the current config |
 | `sosus vocab list\|add\|remove\|import` | Manage the custom vocabulary |
 | `sosus devices` | List audio input devices |

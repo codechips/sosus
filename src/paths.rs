@@ -12,7 +12,6 @@ use time::OffsetDateTime;
 
 const APP_NAME: &str = "sosus";
 const CONFIG_FILE_NAME: &str = "config.toml";
-const DATABASE_FILE_NAME: &str = "sosus.db";
 const DEFAULT_OUTPUT_SUFFIX: &str = "sosus/recordings";
 
 /// Every durable path used by sosus.
@@ -24,7 +23,6 @@ pub struct AppPaths {
     data_dir: PathBuf,
     log_dir: PathBuf,
     model_dir: PathBuf,
-    database_file: PathBuf,
     output_dir: PathBuf,
 }
 
@@ -89,7 +87,6 @@ impl AppPaths {
             config_file,
             log_dir: data_dir.join("logs"),
             model_dir: data_dir.join("models"),
-            database_file: data_dir.join(DATABASE_FILE_NAME),
             data_dir,
             output_dir,
         }
@@ -142,10 +139,6 @@ impl AppPaths {
     #[allow(dead_code)]
     pub fn model_dir(&self) -> &Path {
         &self.model_dir
-    }
-
-    pub fn database_file(&self) -> &Path {
-        &self.database_file
     }
 
     pub fn output_dir(&self) -> &Path {
@@ -327,10 +320,6 @@ mod tests {
         );
         assert_eq!(paths.model_dir(), temp.0.join(".local/share/sosus/models"));
         assert_eq!(paths.log_dir(), temp.0.join(".local/share/sosus/logs"));
-        assert_eq!(
-            paths.database_file(),
-            temp.0.join(".local/share/sosus/sosus.db")
-        );
         assert_eq!(paths.output_dir(), temp.0.join("sosus/recordings"));
     }
 

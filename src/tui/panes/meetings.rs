@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::db::Meeting;
+use crate::archive::Meeting;
 use crate::tui::theme;
 
 pub fn render(
@@ -33,14 +33,9 @@ pub fn render(
             .enumerate()
             .map(|(index, meeting)| {
                 let marker = if index == selected { "▶ " } else { "  " };
-                let title = meeting.title.as_deref().unwrap_or("Untitled meeting");
-                let started = meeting
-                    .started_at
-                    .split('T')
-                    .next()
-                    .unwrap_or(meeting.started_at.as_str());
+                let title = &meeting.name;
                 Line::styled(
-                    format!("{marker}{started}  {title}"),
+                    format!("{marker}{title}"),
                     if index == selected {
                         theme::primary_text()
                     } else {
