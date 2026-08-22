@@ -26,21 +26,46 @@ pub fn assign_speakers(
     assign_words: bool,
 ) -> SpeakerAssignment {
     let turns = valid_sorted_turns(turns);
-    let labels = speaker_labels(&turns);
+    let mut segment_clusters = Vec::with_capacity(transcript.segments.len());
+    let mut word_clusters = Vec::with_capacity(transcript.segments.len());
+    let mut first_appearance = Vec::new();
+
+    for segment in &transcript.segments {
+        let cluster = speaker_for_span(segment.start_seconds, segment.end_seconds, &turns);
+        remember_cluster(cluster, &mut first_appearance);
+        segment_clusters.push(cluster);
+
+        let clusters = if assign_words {
+            segment
+                .words
+                .iter()
+                .map(|word| {
+                    let cluster = speaker_for_span(word.start_seconds, word.end_seconds, &turns);
+                    remember_cluster(cluster, &mut first_appearance);
+                    cluster
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        word_clusters.push(clusters);
+    }
+
+    let labels = speaker_labels(&turns, &first_appearance);
     let mut assignment = SpeakerAssignment {
         speaker_count: labels.len(),
         ..SpeakerAssignment::default()
     };
 
-    for segment in &mut transcript.segments {
-        segment.speaker =
-            speaker_for_span(segment.start_seconds, segment.end_seconds, &turns, &labels);
+    for (index, segment) in transcript.segments.iter_mut().enumerate() {
+        segment.speaker = segment_clusters[index].and_then(|cluster| labels.get(&cluster).cloned());
         assignment.labelled_segments += usize::from(segment.speaker.is_some());
 
         if assign_words {
-            for word in &mut segment.words {
-                word.speaker =
-                    speaker_for_span(word.start_seconds, word.end_seconds, &turns, &labels);
+            for (word, cluster) in segment.words.iter_mut().zip(&word_clusters[index]) {
+                word.speaker = cluster
+                    .as_ref()
+                    .and_then(|cluster| labels.get(cluster).cloned());
                 assignment.labelled_words += usize::from(word.speaker.is_some());
             }
         }
@@ -68,23 +93,31 @@ fn valid_sorted_turns(turns: &[DiarizationTurn]) -> Vec<&DiarizationTurn> {
     turns
 }
 
-fn speaker_labels(turns: &[&DiarizationTurn]) -> HashMap<i32, String> {
+fn remember_cluster(cluster: Option<i32>, first_appearance: &mut Vec<i32>) {
+    if let Some(cluster) = cluster
+        && !first_appearance.contains(&cluster)
+    {
+        first_appearance.push(cluster);
+    }
+}
+
+fn speaker_labels(turns: &[&DiarizationTurn], first_appearance: &[i32]) -> HashMap<i32, String> {
     let mut labels = HashMap::new();
-    for turn in turns {
+    for cluster in first_appearance.iter().copied().chain(
+        turns
+            .iter()
+            .map(|turn| turn.cluster_id)
+            .filter(|cluster| !first_appearance.contains(cluster)),
+    ) {
         let next = labels.len() + 1;
         labels
-            .entry(turn.cluster_id)
+            .entry(cluster)
             .or_insert_with(|| format!("Speaker {next}"));
     }
     labels
 }
 
-fn speaker_for_span(
-    start: f64,
-    end: f64,
-    turns: &[&DiarizationTurn],
-    labels: &HashMap<i32, String>,
-) -> Option<String> {
+fn speaker_for_span(start: f64, end: f64, turns: &[&DiarizationTurn]) -> Option<i32> {
     if !start.is_finite() || !end.is_finite() || start < 0.0 || end <= start {
         return None;
     }
@@ -111,7 +144,7 @@ fn speaker_for_span(
         })
         .map(|(cluster, _)| cluster);
     if let Some(cluster) = overlapping_cluster {
-        return labels.get(&cluster).cloned();
+        return Some(cluster);
     }
 
     turns
@@ -126,7 +159,7 @@ fn speaker_for_span(
                 .then_with(|| left.2.total_cmp(&right.2))
                 .then_with(|| left.0.cmp(&right.0))
         })
-        .and_then(|(cluster, _, _)| labels.get(&cluster).cloned())
+        .map(|(cluster, _, _)| cluster)
 }
 
 fn overlap_seconds(left_start: f64, left_end: f64, right_start: f64, right_end: f64) -> f64 {
@@ -197,7 +230,7 @@ mod tests {
         let result = assign_speakers(&mut transcript, &turns, false);
 
         assert_eq!(result.speaker_count, 2);
-        assert_eq!(transcript.segments[0].speaker.as_deref(), Some("Speaker 2"));
+        assert_eq!(transcript.segments[0].speaker.as_deref(), Some("Speaker 1"));
         assert!(transcript.segments[0].words[0].speaker.is_none());
     }
 
