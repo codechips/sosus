@@ -166,15 +166,29 @@ impl App {
             return;
         }
         let last = self.meetings.len() - 1;
-        self.selected_meeting = if delta.is_negative() {
+        let selected = if delta.is_negative() {
             self.selected_meeting.saturating_sub(delta.unsigned_abs())
         } else {
             (self.selected_meeting + delta as usize).min(last)
         };
-        if let Some(meeting) = self.meetings.get(self.selected_meeting) {
-            self.transcript = meeting.transcript.clone();
-            self.transcript_scroll = 0;
-        }
+        self.select_meeting(selected);
+    }
+
+    fn select_meeting(&mut self, selected: usize) {
+        let Some(meeting) = self.meetings.get(selected) else {
+            return;
+        };
+        self.selected_meeting = selected;
+        self.transcript = meeting.transcript.clone();
+        self.transcript_scroll = 0;
+    }
+
+    fn meeting_row_at(&self, row: u16, terminal_height: u16) -> Option<usize> {
+        let recording_height = u16::from(self.recording.is_some()) * 4;
+        let pane_height = terminal_height.saturating_sub(2 + recording_height);
+        let index = row.checked_sub(2)? as usize;
+        (index < pane_height.saturating_sub(2) as usize && index < self.meetings.len())
+            .then_some(index)
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppAction> {
@@ -290,7 +304,17 @@ impl App {
         None
     }
 
-    fn handle_mouse(&mut self, mouse: MouseEvent, terminal_width: u16) {
+    fn handle_mouse(&mut self, mouse: MouseEvent, terminal_width: u16, terminal_height: u16) {
+        if self.error.is_some()
+            || !self.warnings.is_empty()
+            || self.show_help
+            || self.show_settings
+            || self.confirm_quit_processing
+            || self.delete_confirmation.is_some()
+        {
+            return;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left)
                 if mouse.row > 0
@@ -301,6 +325,14 @@ impl App {
             {
                 self.resizing_sidebar = true;
             }
+            MouseEventKind::Down(MouseButton::Left)
+                if mouse.column < self.clamped_sidebar_width(terminal_width) =>
+            {
+                if let Some(selected) = self.meeting_row_at(mouse.row, terminal_height) {
+                    self.select_meeting(selected);
+                    self.focus = Focus::Meetings;
+                }
+            }
             MouseEventKind::Drag(MouseButton::Left) if self.resizing_sidebar => {
                 self.sidebar_width = mouse.column.clamp(
                     MINIMUM_SIDEBAR_WIDTH,
@@ -308,6 +340,18 @@ impl App {
                 );
             }
             MouseEventKind::Up(MouseButton::Left) => self.resizing_sidebar = false,
+            MouseEventKind::ScrollUp
+                if mouse.column >= self.clamped_sidebar_width(terminal_width) =>
+            {
+                self.transcript_scroll = self.transcript_scroll.saturating_sub(3);
+                self.focus = Focus::Transcript;
+            }
+            MouseEventKind::ScrollDown
+                if mouse.column >= self.clamped_sidebar_width(terminal_width) =>
+            {
+                self.transcript_scroll = self.transcript_scroll.saturating_add(3);
+                self.focus = Focus::Transcript;
+            }
             _ => {}
         }
     }
@@ -611,7 +655,8 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                         }
                     }
                     Some(UiEvent::Terminal(Event::Mouse(mouse))) => {
-                        app.handle_mouse(mouse, terminal.size()?.width);
+                        let size = terminal.size()?;
+                        app.handle_mouse(mouse, size.width, size.height);
                     }
                     Some(UiEvent::Terminal(_)) => {}
                     Some(UiEvent::InputError(error)) => app.error = Some(error),
@@ -1112,6 +1157,7 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             },
             100,
+            24,
         );
         assert!(app.resizing_sidebar);
 
@@ -1123,6 +1169,7 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             },
             100,
+            24,
         );
         assert_eq!(app.sidebar_width, 50);
 
@@ -1134,6 +1181,7 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             },
             100,
+            24,
         );
         assert_eq!(app.sidebar_width, MINIMUM_SIDEBAR_WIDTH);
 
@@ -1145,6 +1193,7 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             },
             100,
+            24,
         );
         assert!(!app.resizing_sidebar);
 
@@ -1156,8 +1205,92 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             },
             100,
+            24,
         );
         assert_eq!(app.sidebar_width, MINIMUM_SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn mouse_click_selects_a_meeting_and_wheel_scrolls_its_transcript() {
+        let mut app = app();
+        app.meetings = vec![
+            Meeting {
+                path: PathBuf::from("/tmp/one"),
+                name: "one".to_owned(),
+                duration_seconds: None,
+                transcript: vec![Segment {
+                    start_s: 0.0,
+                    end_s: 1.0,
+                    speaker: None,
+                    text: "one".to_owned(),
+                }],
+            },
+            Meeting {
+                path: PathBuf::from("/tmp/two"),
+                name: "two".to_owned(),
+                duration_seconds: None,
+                transcript: vec![Segment {
+                    start_s: 0.0,
+                    end_s: 1.0,
+                    speaker: None,
+                    text: "two".to_owned(),
+                }],
+            },
+        ];
+        app.transcript_scroll = 9;
+        app.focus = Focus::Transcript;
+
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 5,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            24,
+        );
+        assert_eq!(app.selected_meeting, 1);
+        assert_eq!(app.transcript[0].text, "two");
+        assert_eq!(app.transcript_scroll, 0);
+        assert_eq!(app.focus, Focus::Meetings);
+
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 40,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            24,
+        );
+        assert_eq!(app.transcript_scroll, 3);
+        assert_eq!(app.focus, Focus::Transcript);
+
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 40,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            24,
+        );
+        assert_eq!(app.transcript_scroll, 0);
+
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 5,
+                row: 22,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            24,
+        );
+        assert_eq!(app.selected_meeting, 1);
     }
 
     #[test]
