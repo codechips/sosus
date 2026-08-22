@@ -97,6 +97,7 @@ struct App {
     focus: Focus,
     show_help: bool,
     settings: Option<modals::settings::SettingsModal>,
+    picker: Option<PickerKind>,
     settings_context: Option<SettingsContext>,
     confirm_quit_processing: bool,
     delete_confirmation: Option<Meeting>,
@@ -126,6 +127,7 @@ impl App {
             focus: Focus::Meetings,
             show_help: false,
             settings: None,
+            picker: None,
             settings_context: startup.settings.map(|settings| SettingsContext {
                 config: settings.config,
                 config_path: settings.config_path,
@@ -248,10 +250,28 @@ impl App {
             }
         }
 
+        if let Some(picker) = &mut self.picker {
+            match picker.modal.handle_key(key) {
+                modals::picker::PickerAction::Cancel => self.picker = None,
+                modals::picker::PickerAction::Choose(value) => {
+                    if let Some(settings) = &mut self.settings {
+                        match picker.kind {
+                            PickerType::Language => settings.set_language(value),
+                            PickerType::Model => settings.set_model(value),
+                        }
+                    }
+                    self.picker = None;
+                }
+                modals::picker::PickerAction::None => {}
+            }
+            return None;
+        }
         if let Some(settings) = &mut self.settings {
             match settings.handle_key(key) {
                 modals::settings::SettingsAction::Cancel => self.settings = None,
                 modals::settings::SettingsAction::Save => return Some(AppAction::SaveSettings),
+                modals::settings::SettingsAction::PickLanguage => self.open_language_picker(),
+                modals::settings::SettingsAction::PickModel => self.open_model_picker(),
                 modals::settings::SettingsAction::None => {}
             }
             return None;
@@ -325,6 +345,7 @@ impl App {
             || !self.warnings.is_empty()
             || self.show_help
             || self.settings.is_some()
+            || self.picker.is_some()
             || self.confirm_quit_processing
             || self.delete_confirmation.is_some()
         {
@@ -391,6 +412,28 @@ impl App {
             return;
         };
         self.settings = Some(modals::settings::SettingsModal::new(context.config.clone()));
+    }
+    fn open_language_picker(&mut self) {
+        let Some(settings) = &self.settings else {
+            return;
+        };
+        self.picker = Some(PickerKind::new(
+            PickerType::Language,
+            "Language",
+            settings.language_options(),
+            &settings.config().transcription.language,
+        ));
+    }
+    fn open_model_picker(&mut self) {
+        let Some(settings) = &self.settings else {
+            return;
+        };
+        self.picker = Some(PickerKind::new(
+            PickerType::Model,
+            "Whisper model",
+            modals::settings::SettingsModal::model_options(),
+            &settings.config().transcription.model,
+        ));
     }
 
     fn save_settings(&mut self) {
@@ -588,6 +631,8 @@ impl App {
             );
         } else if self.show_help {
             render_help(frame, centered_rect(64, 68, area));
+        } else if let Some(picker) = &self.picker {
+            render_picker(frame, &picker.modal, centered_rect(58, 72, area));
         } else if let Some(settings) = &self.settings {
             render_settings(frame, settings, centered_rect(58, 78, area));
         } else if self.confirm_quit_processing {
@@ -622,6 +667,33 @@ struct SettingsContext {
     config: Config,
     config_path: PathBuf,
     fingerprint: ConfigFingerprint,
+}
+
+#[derive(Clone, Copy)]
+enum PickerType {
+    Language,
+    Model,
+}
+struct PickerKind {
+    kind: PickerType,
+    modal: modals::picker::PickerModal,
+}
+impl PickerKind {
+    fn new(
+        kind: PickerType,
+        title: &'static str,
+        items: Vec<(String, String)>,
+        selected: &str,
+    ) -> Self {
+        let items = items
+            .into_iter()
+            .map(|(value, label)| modals::picker::PickerItem { value, label })
+            .collect();
+        Self {
+            kind,
+            modal: modals::picker::PickerModal::new(title, items, selected),
+        }
+    }
 }
 
 struct ActiveRecording {
@@ -1086,13 +1158,49 @@ fn render_settings(frame: &mut Frame<'_>, settings: &modals::settings::SettingsM
     content.extend([
         Line::from(""),
         Line::styled(
-            "← → change · Enter save · Esc cancel",
+            "Enter: choose language/model or save · Esc cancel",
             theme::secondary_text(),
         ),
     ]);
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Settings")
+        .style(theme::overlay())
+        .padding(Padding::uniform(1));
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(content).block(block), area);
+}
+
+fn render_picker(frame: &mut Frame<'_>, picker: &modals::picker::PickerModal, area: Rect) {
+    let visible = picker.visible();
+    let mut content = vec![
+        Line::styled(
+            format!("Filter: {}", picker.filter()),
+            theme::secondary_text(),
+        ),
+        Line::from(""),
+    ];
+    for (index, item) in visible.into_iter().take(14).enumerate() {
+        let line = Line::from(item.label.clone());
+        content.push(if index == picker.selected_index() {
+            line.style(theme::selected_row())
+        } else {
+            line.style(theme::primary_text())
+        });
+    }
+    if content.len() == 2 {
+        content.push(Line::styled("No matches", theme::secondary_text()));
+    }
+    content.extend([
+        Line::from(""),
+        Line::styled(
+            "Type to filter · Enter choose · Esc back",
+            theme::secondary_text(),
+        ),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(picker.title())
         .style(theme::overlay())
         .padding(Padding::uniform(1));
     frame.render_widget(Clear, area);

@@ -46,6 +46,8 @@ pub enum SettingsAction {
     None,
     Cancel,
     Save,
+    PickLanguage,
+    PickModel,
 }
 
 pub struct SettingsModal {
@@ -70,7 +72,11 @@ impl SettingsModal {
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
         match key.code {
             KeyCode::Esc => SettingsAction::Cancel,
-            KeyCode::Enter => SettingsAction::Save,
+            KeyCode::Enter => match self.selected {
+                Field::Language => SettingsAction::PickLanguage,
+                Field::Model => SettingsAction::PickModel,
+                _ => SettingsAction::Save,
+            },
             KeyCode::Up | KeyCode::Char('k') => {
                 self.selected = self.selected.next(true);
                 SettingsAction::None
@@ -89,6 +95,42 @@ impl SettingsModal {
             }
             _ => SettingsAction::None,
         }
+    }
+
+    pub fn set_language(&mut self, language: String) {
+        self.draft.transcription.language = language;
+    }
+    pub fn set_model(&mut self, model: String) {
+        self.draft.transcription.backend = TranscriptionBackend::Whisper;
+        self.draft.transcription.model = model;
+    }
+    pub fn language_options(&self) -> Vec<(String, String)> {
+        let languages = match self.draft.transcription.backend {
+            TranscriptionBackend::Parakeet => PARAKEET_LANGUAGES,
+            TranscriptionBackend::Whisper => WHISPER_LANGUAGES,
+        };
+        let mut options = vec![(String::new(), "Auto-detect".to_owned())];
+        options.extend(
+            languages
+                .iter()
+                .map(|code| ((*code).to_owned(), language(code))),
+        );
+        options
+    }
+    pub fn model_options() -> Vec<(String, String)> {
+        [
+            "",
+            "whisper-tiny",
+            "whisper-base",
+            "whisper-small",
+            "whisper-medium",
+            "whisper-large-v3-turbo",
+            "kb-whisper-base",
+            "nb-whisper-small",
+        ]
+        .into_iter()
+        .map(|model| (model.to_owned(), model_label(model).to_owned()))
+        .collect()
     }
 
     fn adjust(&mut self, reverse: bool) {
