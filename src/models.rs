@@ -297,14 +297,6 @@ pub async fn ensure_model(
         let destination = model_directory.join(&file.filename);
         if verify_file(&destination, file).await? {
             completed_bytes += file.bytes;
-            progress.report(DownloadProgress {
-                model: &model.alias,
-                file: &file.filename,
-                file_bytes: file.bytes,
-                file_total: file.bytes,
-                model_bytes: completed_bytes,
-                model_total,
-            });
             continue;
         }
 

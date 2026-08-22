@@ -3,7 +3,7 @@
 use std::{
     io::{self, IsTerminal},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use anyhow::{Context, bail};
@@ -267,13 +267,12 @@ async fn run_transcribe(
 
     let backend = effective.effective.transcription.backend;
     let capabilities = backend.capabilities();
-    eprintln!("Preparing {}...", capabilities.display_name);
     let model_progress = ConsoleModelProgress::new();
     let model_dir =
         models::ensure_asr_model(capabilities.id, app_paths.model_dir(), &model_progress)
             .await
             .context("could not prepare the transcription model")?;
-    eprintln!();
+    model_progress.finish();
 
     let audio = asr::decode_audio_file(file).context("could not decode the input file")?;
     let thread_count = match effective.effective.transcription.threads {
@@ -365,7 +364,6 @@ async fn run_transcribe(
             &started_text,
         )?;
         persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
-        eprintln!("Preparing speaker diarization models...");
         let model_dirs = match models::ensure_diarization_model(
             "diarization-segmentation",
             app_paths.model_dir(),
@@ -399,8 +397,8 @@ async fn run_transcribe(
                 None
             }
         };
+        model_progress.finish();
         if let Some((segmentation_dir, embedding_dir)) = model_dirs {
-            eprintln!();
             eprintln!("Diarizing {:.1}s of audio...", audio.duration_seconds());
             let diarization = diarize::Diarizer::prepare(&diarize::DiarizationOptions {
                 segmentation_dir,
@@ -545,18 +543,27 @@ fn file_fingerprint(path: &Path) -> anyhow::Result<String> {
 
 struct ConsoleModelProgress {
     last_percent: AtomicU64,
+    downloaded: AtomicBool,
 }
 
 impl ConsoleModelProgress {
     fn new() -> Self {
         Self {
             last_percent: AtomicU64::new(u64::MAX),
+            downloaded: AtomicBool::new(false),
+        }
+    }
+
+    fn finish(&self) {
+        if self.downloaded.swap(false, Ordering::Relaxed) {
+            eprintln!();
         }
     }
 }
 
 impl models::ModelProgressSink for ConsoleModelProgress {
     fn report(&self, progress: models::DownloadProgress<'_>) {
+        self.downloaded.store(true, Ordering::Relaxed);
         let percent = progress
             .model_bytes
             .saturating_mul(100)
@@ -575,28 +582,13 @@ impl models::ModelProgressSink for ConsoleModelProgress {
 struct ConsoleAsrProgress;
 
 impl asr::ProgressSink for ConsoleAsrProgress {
-    fn report(&self, fraction: f32) {
-        if fraction >= 1.0 {
-            eprintln!("Transcription complete.");
-        }
-    }
+    fn report(&self, _fraction: f32) {}
 }
 
 struct ConsoleDiarizationProgress;
 
 impl diarize::ProgressSink for ConsoleDiarizationProgress {
-    fn report(&self, stage: diarize::DiarizationStage, complete: bool) {
-        let name = match stage {
-            diarize::DiarizationStage::Segmentation => "segmentation",
-            diarize::DiarizationStage::Embedding => "embedding",
-            diarize::DiarizationStage::Clustering => "clustering",
-        };
-        if complete {
-            eprintln!("Diarization {name} complete.");
-        } else {
-            eprintln!("Diarization {name}...");
-        }
-    }
+    fn report(&self, _stage: diarize::DiarizationStage, _complete: bool) {}
 }
 
 async fn run_record(cli: &Cli) -> anyhow::Result<()> {
