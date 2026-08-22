@@ -4,8 +4,11 @@
 // keep its public transition surface intact while that adapter is added.
 #![allow(dead_code)]
 
+use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
+    fs, io,
+    path::Path,
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
     thread::{self, JoinHandle},
     time::Duration,
@@ -19,7 +22,8 @@ const STAGE_ORDER: [Stage; 5] = [
     Stage::Index,
 ];
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Stage {
     Transcribe,
     Diarize,
@@ -34,7 +38,8 @@ impl Stage {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StageStatus {
     Pending,
     Running,
@@ -44,7 +49,7 @@ pub enum StageStatus {
     Skipped,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StageState {
     pub stage: Stage,
     pub status: StageStatus,
@@ -56,12 +61,27 @@ pub struct StageState {
     pub error_code: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PipelineState {
     stages: Vec<StageState>,
 }
 
 impl PipelineState {
+    pub const STATE_FILE: &'static str = ".pipeline-state.json";
+
+    pub fn load(path: &Path) -> Result<Self, PipelinePersistenceError> {
+        let bytes = fs::read(path.join(Self::STATE_FILE))?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), PipelinePersistenceError> {
+        let destination = path.join(Self::STATE_FILE);
+        let temporary = path.join(format!(".pipeline-state.{}.partial", std::process::id()));
+        let bytes = serde_json::to_vec_pretty(self)?;
+        fs::write(&temporary, bytes)?;
+        fs::rename(temporary, destination)?;
+        Ok(())
+    }
     pub fn new(skipped: &[Stage]) -> Self {
         Self {
             stages: STAGE_ORDER
@@ -160,6 +180,17 @@ impl PipelineState {
         Ok(())
     }
 
+    pub fn skip(&mut self, stage: Stage) -> Result<(), PipelineError> {
+        let state = &mut self.stages[stage_index(stage)];
+        if state.status != StageStatus::Running {
+            return Err(PipelineError::NotRunning { stage });
+        }
+        state.status = StageStatus::Skipped;
+        state.completed_at = None;
+        state.error_code = None;
+        Ok(())
+    }
+
     pub fn fail(&mut self, stage: Stage, error_code: &str) -> Result<(), PipelineError> {
         let state = &mut self.stages[stage_index(stage)];
         if state.status != StageStatus::Running {
@@ -193,6 +224,14 @@ impl PipelineState {
             }
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PipelinePersistenceError {
+    #[error("could not access pipeline state: {0}")]
+    Io(#[from] io::Error),
+    #[error("could not parse pipeline state: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 fn stage_index(stage: Stage) -> usize {
@@ -487,6 +526,31 @@ mod tests {
             state.stage(Stage::Summarize).unwrap().status,
             StageStatus::Skipped
         );
+    }
+
+    #[test]
+    fn persisted_state_round_trips_and_recovers_interrupted_work() {
+        let root = std::env::temp_dir().join(format!(
+            "sosus-pipeline-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut state = PipelineState::new(&[Stage::Summarize, Stage::Index]);
+        state
+            .begin(Stage::Transcribe, "audio", "asr", "start")
+            .unwrap();
+        state.save(&root).unwrap();
+        let mut loaded = PipelineState::load(&root).unwrap();
+        assert_eq!(loaded.recover_interrupted(), 1);
+        assert_eq!(
+            loaded.stage(Stage::Transcribe).unwrap().status,
+            StageStatus::Failed
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -5,25 +5,18 @@ use std::{fs, io, path::Path};
 use crate::asr::TranscriptResult;
 
 pub fn write_transcript(path: &Path, transcript: &TranscriptResult) -> io::Result<()> {
-    let document = serde_json::json!({
-        "language": transcript.language,
-        "duration_seconds": transcript.duration_seconds,
-        "segments": transcript.segments.iter().map(|segment| serde_json::json!({
-            "start_seconds": segment.start_seconds,
-            "end_seconds": segment.end_seconds,
-            "speaker": segment.speaker,
-            "text": segment.text,
-            "words": segment.words.iter().map(|word| serde_json::json!({
-                "start_seconds": word.start_seconds,
-                "end_seconds": word.end_seconds,
-                "text": word.text,
-                "score": word.score,
-                "speaker": word.speaker,
-            })).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>(),
-    });
-    let bytes = serde_json::to_vec_pretty(&document)
+    let bytes = serde_json::to_vec_pretty(transcript)
         .map_err(|error| io::Error::other(format!("could not encode transcript JSON: {error}")))?;
+    write_bytes(path, &bytes)
+}
+
+pub fn read_transcript(path: &Path) -> io::Result<TranscriptResult> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| io::Error::other(format!("could not parse transcript JSON: {error}")))
+}
+
+fn write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let partial = path.with_file_name(format!(
         ".{}.partial",
         path.file_name()
@@ -41,7 +34,7 @@ pub fn write_transcript(path: &Path, transcript: &TranscriptResult) -> io::Resul
         }
         use std::io::Write;
         let mut file = options.open(&partial)?;
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&partial, path)
@@ -89,9 +82,7 @@ mod tests {
             }],
         };
         write_transcript(&path, &transcript).unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(value["language"], "sv");
-        assert_eq!(value["segments"][0]["speaker"], "Speaker 1");
+        assert_eq!(read_transcript(&path).unwrap(), transcript);
         assert!(!path.with_file_name(".transcript.json.partial").exists());
         let _ = fs::remove_dir_all(root);
     }

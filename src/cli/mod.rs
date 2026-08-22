@@ -103,6 +103,8 @@ pub async fn run() -> anyhow::Result<()> {
                     min_speakers,
                     max_speakers,
                     existing_meeting: None,
+                    resume_state: None,
+                    resume_transcript: None,
                 },
             )
             .await
@@ -120,6 +122,8 @@ pub async fn run() -> anyhow::Result<()> {
                     min_speakers: None,
                     max_speakers: None,
                     existing_meeting: None,
+                    resume_state: None,
+                    resume_transcript: None,
                 },
             )
             .await
@@ -158,6 +162,39 @@ async fn run_resume(cli: &Cli, meeting: &Path) -> anyhow::Result<()> {
     if !audio_path.is_file() {
         bail!("recording file was not found: {}", audio_path.display());
     }
+    let meeting_dir = audio_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let state_path = meeting_dir.join(pipeline::PipelineState::STATE_FILE);
+    let resume_state = if state_path.is_file() {
+        let mut state = pipeline::PipelineState::load(&meeting_dir).with_context(|| {
+            format!(
+                "could not load pipeline state from {}",
+                state_path.display()
+            )
+        })?;
+        let recovered = state.recover_interrupted();
+        if recovered > 0 {
+            state.save(&meeting_dir)?;
+        }
+        Some(state)
+    } else {
+        None
+    };
+    let resume_transcript = match &resume_state {
+        Some(state)
+            if state
+                .stage(pipeline::Stage::Transcribe)
+                .is_some_and(|stage| stage.status == pipeline::StageStatus::Completed) =>
+        {
+            let path = meeting_dir.join(INTERMEDIATE_TRANSCRIPT);
+            Some(export::read_transcript_json(&path).with_context(|| {
+                format!(
+                    "could not load the saved intermediate transcript from {}",
+                    path.display()
+                )
+            })?)
+        }
+        _ => None,
+    };
     eprintln!("Resuming from {}.", audio_path.display());
     run_transcribe(
         cli,
@@ -169,7 +206,9 @@ async fn run_resume(cli: &Cli, meeting: &Path) -> anyhow::Result<()> {
             no_diarize: false,
             min_speakers: None,
             max_speakers: None,
-            existing_meeting: Some(audio_path.parent().unwrap_or(Path::new(".")).to_path_buf()),
+            existing_meeting: Some(meeting_dir),
+            resume_state,
+            resume_transcript,
         },
     )
     .await
@@ -184,6 +223,8 @@ struct TranscribeInvocation<'a> {
     min_speakers: Option<usize>,
     max_speakers: Option<usize>,
     existing_meeting: Option<PathBuf>,
+    resume_state: Option<pipeline::PipelineState>,
+    resume_transcript: Option<asr::TranscriptResult>,
 }
 
 async fn run_transcribe(
@@ -199,6 +240,8 @@ async fn run_transcribe(
         min_speakers,
         max_speakers,
         existing_meeting,
+        resume_state,
+        resume_transcript,
     } = invocation_args;
     let invocation = config::ConfigOverrides {
         config_path: cli.config.clone(),
@@ -233,20 +276,6 @@ async fn run_transcribe(
 
     let backend = effective.effective.transcription.backend;
     let capabilities = backend.capabilities();
-    let model_progress = ConsoleModelProgress::new();
-    eprintln!("Preparing transcription...");
-    let model_dir = models::ensure_asr_model(
-        capabilities.id,
-        &effective.effective.transcription.model,
-        app_paths.model_dir(),
-        &model_progress,
-    )
-    .await
-    .context("could not prepare the transcription model")?;
-    model_progress.finish();
-
-    eprintln!("Reading recording...");
-    let audio = asr::decode_audio_file(file).context("could not decode the input file")?;
     let thread_count = match effective.effective.transcription.threads {
         0 => num_cpus::get_physical().max(1),
         configured => configured,
@@ -254,57 +283,103 @@ async fn run_transcribe(
     let started = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
     let started_text = started.format(&Rfc3339)?;
     let artifact_dir = existing_meeting.unwrap_or(app_paths.create_meeting_dir(started)?);
+    let input_fingerprint = file_fingerprint(file)?;
     let mut skipped = vec![pipeline::Stage::Summarize, pipeline::Stage::Index];
     if !effective.effective.diarization.enabled {
         skipped.push(pipeline::Stage::Diarize);
     }
-    let mut pipeline_state = pipeline::PipelineState::new(&skipped);
-    let input_fingerprint = file_fingerprint(file)?;
-    pipeline_state.begin(
-        pipeline::Stage::Transcribe,
-        &format!("{input_fingerprint}:{}", capabilities.id),
-        capabilities.id,
-        &started_text,
-    )?;
-    let mut transcriber = asr::create_transcriber(backend);
-    eprintln!("Loading transcriber...");
-    if let Err(error) = transcriber.prepare(&asr::PrepareOptions {
-        model_dir,
-        threads: thread_count,
-    }) {
-        pipeline_state.fail(pipeline::Stage::Transcribe, "initialization")?;
-        return Err(anyhow::anyhow!(error)).context("could not initialize transcription");
-    }
-    let language = (!effective.effective.transcription.language.is_empty())
-        .then(|| effective.effective.transcription.language.clone());
-    eprintln!("Transcribing {:.1}s of audio...", audio.duration_seconds());
-    let result = match transcriber.transcribe(
-        &audio,
-        &asr::TranscribeOptions {
-            language,
-            vocabulary: Vec::new(),
-            // Whisper segment timestamps are enough for diarization. Its optional
-            // experimental word timing pass is deliberately not enabled by default.
-            words_required: false,
-        },
-        &ConsoleAsrProgress,
-    ) {
-        Ok(result) => result,
-        Err(error) => {
-            pipeline_state.fail(pipeline::Stage::Transcribe, "runtime")?;
-            return Err(anyhow::anyhow!(error)).context("transcription failed");
-        }
-    };
-    pipeline_state.complete(pipeline::Stage::Transcribe, &started_text)?;
+    let mut pipeline_state = resume_state.unwrap_or_else(|| pipeline::PipelineState::new(&skipped));
+    let intermediate_path = artifact_dir.join(INTERMEDIATE_TRANSCRIPT);
+    let mut result = resume_transcript;
+    let mut audio = None;
 
-    let mut result = result;
-    if effective.effective.diarization.enabled {
+    if result.is_none() {
+        pipeline_state.begin(
+            pipeline::Stage::Transcribe,
+            &format!("{input_fingerprint}:{}", capabilities.id),
+            capabilities.id,
+            &started_text,
+        )?;
+        persist_pipeline(&pipeline_state, &artifact_dir)?;
+        let model_progress = ConsoleModelProgress::new();
+        eprintln!("Preparing transcription...");
+        let model_dir = models::ensure_asr_model(
+            capabilities.id,
+            &effective.effective.transcription.model,
+            app_paths.model_dir(),
+            &model_progress,
+        )
+        .await
+        .context("could not prepare the transcription model")?;
+        model_progress.finish();
+        eprintln!("Reading recording...");
+        let decoded = asr::decode_audio_file(file).context("could not decode the input file")?;
+        let mut transcriber = asr::create_transcriber(backend);
+        eprintln!("Loading transcriber...");
+        if let Err(error) = transcriber.prepare(&asr::PrepareOptions {
+            model_dir,
+            threads: thread_count,
+        }) {
+            pipeline_state.fail(pipeline::Stage::Transcribe, "initialization")?;
+            persist_pipeline(&pipeline_state, &artifact_dir)?;
+            return Err(anyhow::anyhow!(error)).context("could not initialize transcription");
+        }
+        let language = (!effective.effective.transcription.language.is_empty())
+            .then(|| effective.effective.transcription.language.clone());
+        eprintln!(
+            "Transcribing {:.1}s of audio...",
+            decoded.duration_seconds()
+        );
+        match transcriber.transcribe(
+            &decoded,
+            &asr::TranscribeOptions {
+                language,
+                vocabulary: Vec::new(),
+                words_required: false,
+            },
+            &ConsoleAsrProgress,
+        ) {
+            Ok(transcript) => result = Some(transcript),
+            Err(error) => {
+                pipeline_state.fail(pipeline::Stage::Transcribe, "runtime")?;
+                persist_pipeline(&pipeline_state, &artifact_dir)?;
+                return Err(anyhow::anyhow!(error)).context("transcription failed");
+            }
+        }
+        export::write_transcript_json(
+            &intermediate_path,
+            result.as_ref().expect("transcript set"),
+        )?;
+        pipeline_state.complete(pipeline::Stage::Transcribe, &started_text)?;
+        persist_pipeline(&pipeline_state, &artifact_dir)?;
+        audio = Some(decoded);
+    } else {
+        eprintln!("Using saved transcription; skipping Whisper.");
+    }
+
+    let mut result = result.expect("transcript is set after transcription");
+    let diarization_status = pipeline_state
+        .stage(pipeline::Stage::Diarize)
+        .map(|stage| stage.status);
+    if effective.effective.diarization.enabled
+        && !matches!(
+            diarization_status,
+            Some(pipeline::StageStatus::Completed | pipeline::StageStatus::Skipped)
+        )
+    {
         pipeline_state.begin(
             pipeline::Stage::Diarize,
             &format!("{input_fingerprint}:diarization"),
             "sherpa-onnx-diarization-1",
             &started_text,
         )?;
+        persist_pipeline(&pipeline_state, &artifact_dir)?;
+        if audio.is_none() {
+            eprintln!("Reading recording for diarization...");
+            audio = Some(asr::decode_audio_file(file).context("could not decode the input file")?);
+        }
+        let audio = audio.as_ref().expect("audio decoded for diarization");
+        let model_progress = ConsoleModelProgress::new();
         eprintln!("Preparing diarization...");
         let model_dirs = match models::ensure_diarization_model(
             "diarization-segmentation",
@@ -322,7 +397,8 @@ async fn run_transcribe(
             {
                 Ok(embedding_dir) => Some((segmentation_dir, embedding_dir)),
                 Err(error) => {
-                    pipeline_state.fail(pipeline::Stage::Diarize, "model_prepare")?;
+                    pipeline_state.skip(pipeline::Stage::Diarize)?;
+                    persist_pipeline(&pipeline_state, &artifact_dir)?;
                     eprintln!(
                         "warning: diarization model preparation failed; transcript is undiarized: {error}"
                     );
@@ -330,7 +406,8 @@ async fn run_transcribe(
                 }
             },
             Err(error) => {
-                pipeline_state.fail(pipeline::Stage::Diarize, "model_prepare")?;
+                pipeline_state.skip(pipeline::Stage::Diarize)?;
+                persist_pipeline(&pipeline_state, &artifact_dir)?;
                 eprintln!(
                     "warning: diarization model preparation failed; transcript is undiarized: {error}"
                 );
@@ -348,35 +425,47 @@ async fn run_transcribe(
                 max_speakers: effective.effective.diarization.max_speakers,
             });
             match diarization {
-                Ok(mut diarizer) => match diarizer.process(&audio, &ConsoleDiarizationProgress) {
+                Ok(mut diarizer) => match diarizer.process(audio, &ConsoleDiarizationProgress) {
                     Ok(diarization) => {
                         let assignment =
                             diarize::assign_speakers(&mut result, &diarization.turns, false);
+                        export::write_transcript_json(&intermediate_path, &result)?;
                         pipeline_state.complete(pipeline::Stage::Diarize, &started_text)?;
+                        persist_pipeline(&pipeline_state, &artifact_dir)?;
                         eprintln!(
                             "Diarization complete: {} speaker(s).",
                             assignment.speaker_count
                         );
                     }
                     Err(error) => {
-                        pipeline_state.fail(pipeline::Stage::Diarize, "runtime")?;
+                        pipeline_state.skip(pipeline::Stage::Diarize)?;
+                        persist_pipeline(&pipeline_state, &artifact_dir)?;
                         eprintln!("warning: diarization failed; transcript is undiarized: {error}")
                     }
                 },
                 Err(error) => {
-                    pipeline_state.fail(pipeline::Stage::Diarize, "initialization")?;
+                    pipeline_state.skip(pipeline::Stage::Diarize)?;
+                    persist_pipeline(&pipeline_state, &artifact_dir)?;
                     eprintln!("warning: diarization failed; transcript is undiarized: {error}")
                 }
             }
         }
     }
 
+    if pipeline_state
+        .stage(pipeline::Stage::Export)
+        .is_some_and(|stage| stage.status == pipeline::StageStatus::Completed)
+    {
+        eprintln!("Transcript artifacts are already complete.");
+        return Ok(());
+    }
     pipeline_state.begin(
         pipeline::Stage::Export,
         &format!("{input_fingerprint}:markdown-v1"),
         "markdown-export-v1",
         &started_text,
     )?;
+    persist_pipeline(&pipeline_state, &artifact_dir)?;
     eprintln!("Saving transcript...");
     for segment in &result.segments {
         if let Some(speaker) = &segment.speaker {
@@ -407,8 +496,17 @@ async fn run_transcribe(
         }
     }
     pipeline_state.complete(pipeline::Stage::Export, &started_text)?;
+    persist_pipeline(&pipeline_state, &artifact_dir)?;
 
     Ok(())
+}
+
+const INTERMEDIATE_TRANSCRIPT: &str = ".transcript-work.json";
+
+fn persist_pipeline(state: &pipeline::PipelineState, meeting_dir: &Path) -> anyhow::Result<()> {
+    state
+        .save(meeting_dir)
+        .context("could not save pipeline state")
 }
 
 fn file_fingerprint(path: &Path) -> anyhow::Result<String> {
@@ -567,6 +665,8 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
                     .unwrap_or(Path::new("."))
                     .to_path_buf(),
             ),
+            resume_state: None,
+            resume_transcript: None,
         },
     )
     .await

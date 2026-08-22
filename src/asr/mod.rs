@@ -214,7 +214,7 @@ pub fn requests_backend_word_timestamps(
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Word {
     pub start_seconds: f64,
     pub end_seconds: f64,
@@ -223,7 +223,7 @@ pub struct Word {
     pub speaker: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Segment {
     pub start_seconds: f64,
     pub end_seconds: f64,
@@ -232,7 +232,7 @@ pub struct Segment {
     pub speaker: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptResult {
     pub language: String,
     pub duration_seconds: f64,
