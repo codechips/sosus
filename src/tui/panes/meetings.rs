@@ -13,10 +13,11 @@ use crate::tui::theme;
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
-    _focused: bool,
+    focused: bool,
     meetings: &[Meeting],
     selected: usize,
 ) {
+    let inner_width = area.width.saturating_sub(2) as usize;
     let lines = if meetings.is_empty() {
         vec![Line::styled("No recordings", theme::secondary_text())]
     } else {
@@ -24,9 +25,9 @@ pub fn render(
             .iter()
             .enumerate()
             .map(|(index, meeting)| {
-                let marker = if index == selected { "› " } else { "  " };
+                let label = meeting_label(&meeting.name);
                 Line::styled(
-                    format!("{marker}{}", meeting_label(&meeting.name)),
+                    format!("{label:<inner_width$}"),
                     if index == selected {
                         theme::selected_row()
                     } else {
@@ -38,8 +39,8 @@ pub fn render(
     };
     let body = Text::from(lines);
     let block = Block::default()
-        .borders(Borders::RIGHT)
-        .border_style(theme::pane_border(false));
+        .borders(Borders::ALL)
+        .border_style(theme::pane_border(focused));
 
     frame.render_widget(
         Paragraph::new(body).block(block).wrap(Wrap { trim: true }),

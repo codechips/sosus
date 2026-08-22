@@ -2,9 +2,6 @@
 
 use std::{collections::VecDeque, path::Path, time::Instant};
 
-use spectrum_analyzer::scaling::divide_by_N_sqrt;
-use spectrum_analyzer::windows::hann_window;
-use spectrum_analyzer::{FrequencyLimit, samples_fft_to_spectrum};
 use thiserror::Error;
 
 use super::{
@@ -14,8 +11,6 @@ use super::{
 };
 
 const SOURCE_BUFFER_FRAMES: usize = 8_192;
-const SPECTRUM_SAMPLE_COUNT: usize = 1_024;
-const SPECTRUM_BUFFER_CAPACITY: usize = SPECTRUM_SAMPLE_COUNT * 4;
 const DEFAULT_GAIN: f32 = 0.707_945_76; // -3 dB
 
 /// A live core recording. Call [`pump`](Self::pump) regularly from a non-real-time task.
@@ -40,8 +35,6 @@ pub struct RecordingSession {
     microphone_failed: bool,
     system_peak: f32,
     microphone_peak: f32,
-    spectrum_samples: VecDeque<f32>,
-    spectrum_levels: Vec<f32>,
 }
 
 impl RecordingSession {
@@ -74,8 +67,6 @@ impl RecordingSession {
             microphone_failed: false,
             system_peak: 0.0,
             microphone_peak: 0.0,
-            spectrum_samples: VecDeque::with_capacity(SPECTRUM_BUFFER_CAPACITY),
-            spectrum_levels: Vec::new(),
         })
     }
 
@@ -128,50 +119,6 @@ impl RecordingSession {
 
     pub fn input_levels(&self) -> (f32, f32) {
         (self.system_peak, self.microphone_peak)
-    }
-
-    /// Return smoothed logarithmic frequency-band levels for the live visualizer.
-    pub fn spectrum(&mut self, bands: usize) -> Vec<f32> {
-        if bands == 0 || self.spectrum_samples.len() < SPECTRUM_SAMPLE_COUNT {
-            return Vec::new();
-        }
-        let samples = self
-            .spectrum_samples
-            .iter()
-            .rev()
-            .take(SPECTRUM_SAMPLE_COUNT)
-            .copied()
-            .collect::<Vec<_>>();
-        let windowed = hann_window(&samples);
-        let Ok(spectrum) = samples_fft_to_spectrum(
-            &windowed,
-            RECORDING_SAMPLE_RATE,
-            FrequencyLimit::Range(40.0, 16_000.0),
-            Some(&divide_by_N_sqrt),
-        ) else {
-            return Vec::new();
-        };
-        let data = spectrum.data();
-        let mut levels = Vec::with_capacity(bands);
-        for band in 0..bands {
-            let low = 40.0_f32 * (16_000.0_f32 / 40.0_f32).powf(band as f32 / bands as f32);
-            let high = 40.0_f32 * (16_000.0_f32 / 40.0_f32).powf((band + 1) as f32 / bands as f32);
-            let amplitude = data
-                .iter()
-                .filter(|(frequency, _)| frequency.val() >= low && frequency.val() < high)
-                .map(|(_, amplitude)| amplitude.val())
-                .fold(0.0_f32, f32::max);
-            // Use a speech-oriented range so ordinary conversation occupies the
-            // display instead of collapsing into a few barely visible pixels.
-            levels.push(((20.0 * amplitude.max(1.0e-7).log10() + 55.0) / 55.0).clamp(0.0, 1.0));
-        }
-        if self.spectrum_levels.len() != bands {
-            self.spectrum_levels = vec![0.0; bands];
-        }
-        for (previous, current) in self.spectrum_levels.iter_mut().zip(levels) {
-            *previous = (*previous * 0.45 + current * 0.55).clamp(0.0, 1.0);
-        }
-        self.spectrum_levels.clone()
     }
 
     fn drain_microphone(&mut self) {
@@ -234,12 +181,6 @@ impl RecordingSession {
             let microphone = self.microphone_ready.pop_front().unwrap_or(0.0);
             self.mix
                 .push((system * DEFAULT_GAIN + microphone * DEFAULT_GAIN).clamp(-1.0, 1.0));
-        }
-        for sample in &self.mix {
-            self.spectrum_samples.push_back(*sample);
-        }
-        while self.spectrum_samples.len() > SPECTRUM_BUFFER_CAPACITY {
-            self.spectrum_samples.pop_front();
         }
         self.sink.write_samples(&self.mix)?;
         Ok(())

@@ -99,7 +99,6 @@ struct App {
     transcript: Vec<Segment>,
     transcript_scroll: u16,
     input_levels: Option<(f32, f32)>,
-    spectrum: Vec<f32>,
 }
 
 impl App {
@@ -122,7 +121,6 @@ impl App {
             transcript: Vec::new(),
             transcript_scroll: 0,
             input_levels: None,
-            spectrum: Vec::new(),
         }
     }
 
@@ -242,7 +240,6 @@ impl App {
             return Ok(None);
         };
         self.input_levels = None;
-        self.spectrum.clear();
         self.recording_context
             .as_ref()
             .context("recording is not configured")?;
@@ -268,7 +265,6 @@ impl App {
         if let Some(active) = &mut self.recording {
             active.session.pump()?;
             self.input_levels = Some(active.session.input_levels());
-            self.spectrum = active.session.spectrum(96);
         }
         Ok(())
     }
@@ -301,6 +297,7 @@ impl App {
             render_too_small(frame, area);
             return;
         }
+        let content_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
 
         let (columns, recording_area) = if self.recording.is_some() {
             let rows = Layout::default()
@@ -308,8 +305,8 @@ impl App {
                 // Keep the recording controls in a compact, predictable lower pane. A
                 // fixed height also prevents the visualizer from swallowing the explorer
                 // and transcript when the terminal is tall.
-                .constraints([Constraint::Min(8), Constraint::Length(7)])
-                .split(area);
+                .constraints([Constraint::Min(8), Constraint::Length(4)])
+                .split(content_area);
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(28), Constraint::Min(40)])
@@ -319,7 +316,7 @@ impl App {
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(28), Constraint::Min(40)])
-                .split(area);
+                .split(content_area);
             (columns, None)
         };
 
@@ -347,7 +344,6 @@ impl App {
                     .map(|active| active.session.elapsed_seconds()),
                 self.last_recording.as_deref(),
                 self.input_levels,
-                &self.spectrum,
             );
         }
 
@@ -364,9 +360,8 @@ impl App {
             render_help(frame, centered_rect(64, 68, area));
         } else if self.show_settings {
             render_settings_preview(frame, centered_rect(64, 50, area));
-        } else if let Some(message) = &self.message {
-            render_message(frame, message, area);
         }
+        render_status_bar(frame, area, self);
     }
 }
 
@@ -770,11 +765,24 @@ fn render_notice(frame: &mut Frame<'_>, title: &str, message: &str, area: Rect) 
     );
 }
 
-fn render_message(frame: &mut Frame<'_>, message: &str, area: Rect) {
-    let message_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let status = if let Some(active) = &app.recording {
+        format!(
+            " ● Recording  {:02}:{:02}  ·  r to stop",
+            active.session.elapsed_seconds() as u64 / 60,
+            active.session.elapsed_seconds() as u64 % 60
+        )
+    } else if app.pipeline_status.is_some() {
+        " Processing recording".to_owned()
+    } else if let Some(message) = &app.message {
+        format!(" {message}")
+    } else {
+        " r to record".to_owned()
+    };
+    let status_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     frame.render_widget(
-        Paragraph::new(message).style(theme::secondary_text()),
-        message_area,
+        Paragraph::new(status).style(theme::status_bar()),
+        status_area,
     );
 }
 

@@ -32,6 +32,10 @@ pub fn warning_text() -> Style {
     Style::default().fg(Color::Yellow)
 }
 
+pub fn status_bar() -> Style {
+    Style::default().bg(Color::DarkGray).fg(Color::White)
+}
+
 pub fn overlay() -> Style {
     Style::default().bg(Color::Black).fg(Color::White)
 }

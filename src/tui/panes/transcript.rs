@@ -4,20 +4,18 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     text::{Line, Text},
-    widgets::{Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 use crate::archive::Segment;
 use crate::tui::theme;
 
-pub fn render(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    _focused: bool,
-    segments: &[Segment],
-    scroll: u16,
-) {
+pub fn render(frame: &mut Frame<'_>, area: Rect, focused: bool, segments: &[Segment], scroll: u16) {
     if segments.is_empty() {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme::pane_border(focused));
+        frame.render_widget(block, area);
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -45,8 +43,12 @@ pub fn render(
         lines.push(Line::raw(""));
     }
     let body = Text::from(lines);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::pane_border(focused));
     frame.render_widget(
         Paragraph::new(body)
+            .block(block)
             .wrap(Wrap { trim: true })
             .scroll((scroll, 0)),
         area,
