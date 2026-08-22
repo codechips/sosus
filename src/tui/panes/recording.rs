@@ -22,6 +22,7 @@ pub fn render(
     } else {
         "Recording"
     };
+    let meter_width = area.width.saturating_sub(10).clamp(10, 28) as usize;
     let body = if let Some(elapsed) = elapsed_seconds {
         let minutes = elapsed as u64 / 60;
         let seconds = elapsed as u64 % 60;
@@ -34,8 +35,16 @@ pub fn render(
                 format!("Elapsed {minutes:02}:{seconds:02}"),
                 theme::primary_text(),
             ),
-            meter_line("System", input_levels.map_or(0.0, |levels| levels.0)),
-            meter_line("Mic", input_levels.map_or(0.0, |levels| levels.1)),
+            meter_line(
+                "System",
+                input_levels.map_or(0.0, |levels| levels.0),
+                meter_width,
+            ),
+            meter_line(
+                "Mic",
+                input_levels.map_or(0.0, |levels| levels.1),
+                meter_width,
+            ),
             Line::styled("r or Ctrl+C to stop", theme::secondary_text()),
         ])
     } else {
@@ -66,9 +75,9 @@ pub fn render(
     );
 }
 
-fn meter_line(label: &str, level: f32) -> Line<'static> {
-    let filled = (meter_level(level) * 10.0).round() as usize;
-    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
+fn meter_line(label: &str, level: f32, width: usize) -> Line<'static> {
+    let filled = (meter_level(level) * width as f32).round() as usize;
+    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(width - filled));
     Line::from(vec![
         Span::styled(format!("{label:<6}"), theme::secondary_text()),
         Span::styled(bar, theme::accent_text()),
