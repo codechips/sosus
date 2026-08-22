@@ -662,16 +662,20 @@ fn open_meeting_folder(path: &Path) -> anyhow::Result<()> {
 }
 
 fn trash_meeting_folder(path: &Path) -> anyhow::Result<()> {
-    let script = "on run argv\n  tell application \"Finder\"\n    delete POSIX file (item 1 of argv)\n  end tell\nend run";
-    let status = Command::new("osascript")
-        .args(["-e", script])
-        .arg(path)
+    let status = finder_trash_command(path)
         .status()
         .with_context(|| format!("could not ask Finder to trash {}", path.display()))?;
     if !status.success() {
         anyhow::bail!("Finder could not move {} to Trash", path.display());
     }
     Ok(())
+}
+
+fn finder_trash_command(path: &Path) -> Command {
+    let script = "on run argv\n  set targetItem to POSIX file (item 1 of argv) as alias\n  tell application \"Finder\" to delete targetItem\nend run";
+    let mut command = Command::new("osascript");
+    command.args(["-e", script, "--"]).arg(path);
+    command
 }
 
 type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
@@ -1065,6 +1069,20 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
             Some(AppAction::OpenMeetingFolder(PathBuf::from("/tmp/meeting")))
         );
+    }
+
+    #[test]
+    fn finder_trash_command_passes_the_path_as_an_apple_script_argument() {
+        let command = finder_trash_command(Path::new("/tmp/meeting"));
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args[0], "-e");
+        assert!(args[1].contains("as alias"));
+        assert_eq!(args[2], "--");
+        assert_eq!(args[3], "/tmp/meeting");
     }
 
     #[test]
