@@ -127,6 +127,7 @@ impl SettingsModal {
             "whisper-large-v3-turbo",
             "kb-whisper-base",
             "nb-whisper-small",
+            "__custom__",
         ]
         .into_iter()
         .map(|model| (model.to_owned(), model_label(model).to_owned()))
@@ -389,6 +390,7 @@ fn model_label(value: &str) -> &'static str {
         "whisper-large-v3-turbo" => "Whisper Large v3 Turbo",
         "kb-whisper-base" => "KB-Whisper Base (Swedish)",
         "nb-whisper-small" => "NB-Whisper Small (Norwegian)",
+        "__custom__" => "Import custom model…",
         _ => "Custom Whisper model",
     }
 }

@@ -257,6 +257,15 @@ impl App {
                     if let Some(settings) = &mut self.settings {
                         match picker.kind {
                             PickerType::Language => settings.set_language(value),
+                            PickerType::Model if value == "__custom__" => {
+                                match choose_custom_model() {
+                                    Ok(path) => settings.set_model(path.display().to_string()),
+                                    Err(error) => {
+                                        self.error =
+                                            Some(format!("Could not import custom model: {error}"))
+                                    }
+                                }
+                            }
                             PickerType::Model => settings.set_model(value),
                         }
                     }
@@ -642,6 +651,25 @@ impl App {
         }
         render_status_bar(frame, area, self);
     }
+}
+
+fn choose_custom_model() -> anyhow::Result<PathBuf> {
+    let output = Command::new("osascript")
+        .args([
+            "-e",
+            "POSIX path of (choose file with prompt \"Choose a Whisper GGML/GGUF model\")",
+        ])
+        .output()
+        .context("open model file chooser")?;
+    anyhow::ensure!(output.status.success(), "selection cancelled");
+    let path = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    let extension = path.extension().and_then(|value| value.to_str());
+    anyhow::ensure!(
+        matches!(extension, Some("bin" | "ggml" | "gguf")),
+        "choose a .bin, .ggml, or .gguf Whisper model"
+    );
+    anyhow::ensure!(path.is_file(), "selected path is not a file");
+    Ok(path)
 }
 
 pub struct Startup {
