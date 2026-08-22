@@ -1,5 +1,6 @@
 [tools]
 rust = "1.88.0"
+cmake = "4.4.2"
 
 [tasks.dev]
 description = "Run the interactive terminal UI"

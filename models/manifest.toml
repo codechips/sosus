@@ -36,6 +36,23 @@ sha256 = "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
 bytes = 93939
 
 [[models]]
+alias = "whisper-base"
+kind = "asr"
+asr_backend = "whisper"
+repository = "ggerganov/whisper.cpp"
+revision = "5359861c739e955e79d9a303bcbc70fb988958b1"
+origin_url = "https://huggingface.co/ggerganov/whisper.cpp"
+license = "MIT"
+attribution = "OpenAI Whisper base, converted to GGML and distributed by ggerganov/whisper.cpp"
+redirect_hosts = ["huggingface.co", "us.aws.cdn.hf.co"]
+
+[[models.files]]
+filename = "ggml-base.bin"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin"
+sha256 = "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
+bytes = 147951465
+
+[[models]]
 alias = "pyannote-segmentation-3-0-int8"
 kind = "diarization-segmentation"
 repository = "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0"

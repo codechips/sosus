@@ -36,6 +36,7 @@ toml_edit = "0.25.13"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 sherpa-onnx = "1.13.5"
+whisper-rs = { version = "0.16.0", features = ["metal", "tracing_backend"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6.2", default-features = false, features = ["alloc"] }

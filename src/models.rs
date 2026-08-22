@@ -679,6 +679,22 @@ mod tests {
     }
 
     #[test]
+    fn embedded_manifest_pins_the_whisper_fallback() {
+        let manifest = manifest().unwrap();
+        let model = manifest.asr_model("whisper").unwrap();
+
+        assert_eq!(model.alias, "whisper-base");
+        assert_eq!(model.revision.len(), 40);
+        assert_eq!(model.files.len(), 1);
+        assert_eq!(model.files[0].filename, "ggml-base.bin");
+        assert_eq!(model.files[0].bytes, 147_951_465);
+        assert_eq!(
+            model.files[0].sha256,
+            "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
+        );
+    }
+
+    #[test]
     fn embedded_manifest_pins_both_diarization_models() {
         let manifest = manifest().unwrap();
         let segmentation = manifest

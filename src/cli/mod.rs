@@ -279,7 +279,9 @@ async fn run_transcribe(
         &asr::TranscribeOptions {
             language,
             vocabulary: Vec::new(),
-            words_required: true,
+            // Whisper segment timestamps are enough for diarization. Its optional
+            // experimental word timing pass is deliberately not enabled by default.
+            words_required: false,
         },
         &ConsoleAsrProgress,
     ) {
