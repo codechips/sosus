@@ -268,7 +268,7 @@ impl App {
         if let Some(active) = &mut self.recording {
             active.session.pump()?;
             self.input_levels = Some(active.session.input_levels());
-            self.spectrum = active.session.spectrum(24);
+            self.spectrum = active.session.spectrum(96);
         }
         Ok(())
     }

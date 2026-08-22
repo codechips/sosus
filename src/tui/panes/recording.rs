@@ -29,7 +29,7 @@ pub fn render(
     let body = if let Some(elapsed) = elapsed_seconds {
         let minutes = elapsed as u64 / 60;
         let seconds = elapsed as u64 % 60;
-        Text::from(vec![
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled("Status  ", theme::secondary_text()),
                 Span::styled("RECORDING", theme::warning_text()),
@@ -48,13 +48,21 @@ pub fn render(
                 input_levels.map_or(0.0, |levels| levels.1),
                 meter_width,
             ),
-            spectrum_line(spectrum, meter_width),
+            Line::styled("Spectrum", theme::secondary_text()),
+        ];
+        lines.extend(spectrum_lines(
+            spectrum,
+            area.width.saturating_sub(4) as usize,
+            6,
+        ));
+        lines.extend([
             Line::styled(
                 pipeline_status.map_or("Pipeline  recording", |status| status),
                 theme::secondary_text(),
             ),
             Line::styled("r or Ctrl+C to stop", theme::secondary_text()),
-        ])
+        ]);
+        Text::from(lines)
     } else {
         let mut lines = vec![
             Line::from(vec![
@@ -83,31 +91,25 @@ pub fn render(
     );
 }
 
-fn spectrum_line(levels: &[f32], width: usize) -> Line<'static> {
-    let available = width.max(1);
-    let bars = if levels.is_empty() {
-        "·".repeat(available)
-    } else {
-        let count = levels.len().min(available);
-        levels
-            .iter()
-            .take(count)
-            .map(|level| match (level * 8.0).round() as u8 {
-                0 => '▁',
-                1 => '▂',
-                2 => '▃',
-                3 => '▄',
-                4 => '▅',
-                5 => '▆',
-                6 => '▇',
-                _ => '█',
-            })
-            .collect::<String>()
-    };
-    Line::from(vec![
-        Span::styled("Audio  ", theme::secondary_text()),
-        Span::styled(bars, theme::accent_text()),
-    ])
+fn spectrum_lines(levels: &[f32], width: usize, height: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let height = height.max(1);
+    let columns = (0..width)
+        .map(|column| {
+            let index = column.saturating_mul(levels.len()) / width;
+            levels.get(index).copied().unwrap_or(0.0).clamp(0.0, 1.0)
+        })
+        .collect::<Vec<_>>();
+    (0..height)
+        .map(|row| {
+            let threshold = (height - row) as f32 / height as f32;
+            let bars = columns
+                .iter()
+                .map(|level| if *level >= threshold { '█' } else { ' ' })
+                .collect::<String>();
+            Line::from(Span::styled(bars, theme::accent_text()))
+        })
+        .collect()
 }
 
 fn meter_line(label: &str, level: f32, width: usize) -> Line<'static> {

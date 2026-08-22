@@ -2,6 +2,9 @@
 
 use std::{collections::VecDeque, path::Path, time::Instant};
 
+use spectrum_analyzer::scaling::divide_by_N_sqrt;
+use spectrum_analyzer::windows::hann_window;
+use spectrum_analyzer::{FrequencyLimit, samples_fft_to_spectrum};
 use thiserror::Error;
 
 use super::{
@@ -11,7 +14,7 @@ use super::{
 };
 
 const SOURCE_BUFFER_FRAMES: usize = 8_192;
-const SPECTRUM_SAMPLE_COUNT: usize = 256;
+const SPECTRUM_SAMPLE_COUNT: usize = 1_024;
 const SPECTRUM_BUFFER_CAPACITY: usize = SPECTRUM_SAMPLE_COUNT * 4;
 const DEFAULT_GAIN: f32 = 0.707_945_76; // -3 dB
 
@@ -139,32 +142,26 @@ impl RecordingSession {
             .take(SPECTRUM_SAMPLE_COUNT)
             .copied()
             .collect::<Vec<_>>();
+        let windowed = hann_window(&samples);
+        let Ok(spectrum) = samples_fft_to_spectrum(
+            &windowed,
+            RECORDING_SAMPLE_RATE,
+            FrequencyLimit::Range(40.0, 16_000.0),
+            Some(&divide_by_N_sqrt),
+        ) else {
+            return Vec::new();
+        };
+        let data = spectrum.data();
         let mut levels = Vec::with_capacity(bands);
         for band in 0..bands {
-            let minimum_bin = 1.0_f32;
-            let maximum_bin = (SPECTRUM_SAMPLE_COUNT / 2) as f32;
-            let ratio = maximum_bin / minimum_bin;
-            let start = (minimum_bin * ratio.powf(band as f32 / bands as f32)) as usize;
-            let end = (minimum_bin * ratio.powf((band + 1) as f32 / bands as f32)) as usize;
-            let mut energy = 0.0_f32;
-            for bin in start..end.max(start + 1) {
-                let mut real = 0.0_f32;
-                let mut imaginary = 0.0_f32;
-                for (index, sample) in samples.iter().enumerate() {
-                    let angle = 2.0 * std::f32::consts::PI * bin as f32 * index as f32
-                        / SPECTRUM_SAMPLE_COUNT as f32;
-                    let window = 0.5
-                        * (1.0
-                            - (2.0 * std::f32::consts::PI * index as f32
-                                / (SPECTRUM_SAMPLE_COUNT - 1) as f32)
-                                .cos());
-                    real += sample * window * angle.cos();
-                    imaginary -= sample * window * angle.sin();
-                }
-                energy += (real * real + imaginary * imaginary).sqrt();
-            }
-            let normalized = (energy / (end.max(start + 1) - start) as f32 / 24.0).clamp(0.0, 1.0);
-            levels.push(normalized);
+            let low = 40.0_f32 * (16_000.0_f32 / 40.0_f32).powf(band as f32 / bands as f32);
+            let high = 40.0_f32 * (16_000.0_f32 / 40.0_f32).powf((band + 1) as f32 / bands as f32);
+            let amplitude = data
+                .iter()
+                .filter(|(frequency, _)| frequency.val() >= low && frequency.val() < high)
+                .map(|(_, amplitude)| amplitude.val())
+                .fold(0.0_f32, f32::max);
+            levels.push(((20.0 * amplitude.max(1.0e-7).log10() + 70.0) / 70.0).clamp(0.0, 1.0));
         }
         if self.spectrum_levels.len() != bands {
             self.spectrum_levels = vec![0.0; bands];
