@@ -22,7 +22,10 @@ use std::{
 use anyhow::Context;
 use crossterm::{
     cursor::Show,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -48,6 +51,9 @@ use crate::{
 
 const MINIMUM_WIDTH: u16 = 80;
 const MINIMUM_HEIGHT: u16 = 24;
+const DEFAULT_SIDEBAR_WIDTH: u16 = 28;
+const MINIMUM_SIDEBAR_WIDTH: u16 = 18;
+const MINIMUM_TRANSCRIPT_WIDTH: u16 = 40;
 const PROCESSING_DOTS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -106,6 +112,8 @@ struct App {
     transcript: Vec<Segment>,
     transcript_scroll: u16,
     input_levels: Option<(f32, f32)>,
+    sidebar_width: u16,
+    resizing_sidebar: bool,
 }
 
 impl App {
@@ -132,6 +140,8 @@ impl App {
             transcript: Vec::new(),
             transcript_scroll: 0,
             input_levels: None,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            resizing_sidebar: false,
         }
     }
 
@@ -280,6 +290,41 @@ impl App {
         None
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent, terminal_width: u16) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left)
+                if mouse.row > 0
+                    && mouse
+                        .column
+                        .abs_diff(self.clamped_sidebar_width(terminal_width))
+                        <= 1 =>
+            {
+                self.resizing_sidebar = true;
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.resizing_sidebar => {
+                self.sidebar_width = mouse.column.clamp(
+                    MINIMUM_SIDEBAR_WIDTH,
+                    self.maximum_sidebar_width(terminal_width),
+                );
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.resizing_sidebar = false,
+            _ => {}
+        }
+    }
+
+    fn clamped_sidebar_width(&self, terminal_width: u16) -> u16 {
+        self.sidebar_width.clamp(
+            MINIMUM_SIDEBAR_WIDTH,
+            self.maximum_sidebar_width(terminal_width),
+        )
+    }
+
+    fn maximum_sidebar_width(&self, terminal_width: u16) -> u16 {
+        terminal_width
+            .saturating_sub(MINIMUM_TRANSCRIPT_WIDTH)
+            .max(MINIMUM_SIDEBAR_WIDTH)
+    }
+
     async fn start_recording(&mut self) -> anyhow::Result<()> {
         let context = self
             .recording_context
@@ -374,6 +419,7 @@ impl App {
             area.height.saturating_sub(2),
         );
         render_header_bar(frame, area);
+        let sidebar_width = self.clamped_sidebar_width(area.width);
 
         let (columns, recording_area) = if self.recording.is_some() {
             let rows = Layout::default()
@@ -385,13 +431,19 @@ impl App {
                 .split(content_area);
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(28), Constraint::Min(40)])
+                .constraints([
+                    Constraint::Length(sidebar_width),
+                    Constraint::Min(MINIMUM_TRANSCRIPT_WIDTH),
+                ])
                 .split(rows[0]);
             (columns, Some(rows[1]))
         } else {
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(28), Constraint::Min(40)])
+                .constraints([
+                    Constraint::Length(sidebar_width),
+                    Constraint::Min(MINIMUM_TRANSCRIPT_WIDTH),
+                ])
                 .split(content_area);
             (columns, None)
         };
@@ -558,6 +610,9 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                             None => {}
                         }
                     }
+                    Some(UiEvent::Terminal(Event::Mouse(mouse))) => {
+                        app.handle_mouse(mouse, terminal.size()?.width);
+                    }
                     Some(UiEvent::Terminal(_)) => {}
                     Some(UiEvent::InputError(error)) => app.error = Some(error),
                     None => {
@@ -695,7 +750,7 @@ impl TerminalGuard {
     fn enter() -> io::Result<(Self, AppTerminal)> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
             let _ = disable_raw_mode();
             return Err(error);
         }
@@ -752,7 +807,7 @@ fn restore_active_terminal() -> io::Result<()> {
 
 fn restore_terminal() -> io::Result<()> {
     let cursor_result = execute!(io::stdout(), Show);
-    let screen_result = execute!(io::stdout(), LeaveAlternateScreen);
+    let screen_result = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     let raw_mode_result = disable_raw_mode();
     cursor_result.and(screen_result).and(raw_mode_result)
 }
@@ -1044,6 +1099,65 @@ mod tests {
         assert_eq!(app.focus, Focus::Meetings);
         let _ = app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(app.focus, Focus::Recording);
+    }
+
+    #[test]
+    fn dragging_the_divider_resizes_the_sidebar_with_safe_bounds() {
+        let mut app = app();
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: DEFAULT_SIDEBAR_WIDTH,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+        );
+        assert!(app.resizing_sidebar);
+
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 50,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+        );
+        assert_eq!(app.sidebar_width, 50);
+
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 1,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+        );
+        assert_eq!(app.sidebar_width, MINIMUM_SIDEBAR_WIDTH);
+
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 1,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+        );
+        assert!(!app.resizing_sidebar);
+
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 60,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+        );
+        assert_eq!(app.sidebar_width, MINIMUM_SIDEBAR_WIDTH);
     }
 
     #[test]
