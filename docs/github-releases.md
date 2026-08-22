@@ -6,7 +6,7 @@ The workflow does not run from pull requests or `main`. A release tag is deliber
 
 ## Required repository secrets
 
-Add these under **Settings → Secrets and variables → Actions** before pushing a release tag:
+Create a protected `release` environment under **Settings → Environments** first. Restrict it to the release maintainer and allow only `v20*` tags. Add these secrets to that environment—not repository-wide—before pushing a release tag:
 
 | Secret | Value |
 | --- | --- |

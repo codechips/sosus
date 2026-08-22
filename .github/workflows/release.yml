@@ -17,6 +17,7 @@ jobs:
     name: Build and publish macOS arm64 release
     runs-on: macos-15
     timeout-minutes: 60
+    environment: release
 
     steps:
       - name: Check out tagged source
@@ -38,6 +39,10 @@ jobs:
       - name: Verify release identity and quality gates
         shell: bash
         run: |
+          set -euo pipefail
+          tag_commit=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor "$tag_commit" origin/main
           test "${GITHUB_REF_NAME#v}" = "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
           mise run ci
 

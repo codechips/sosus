@@ -3,8 +3,11 @@
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    fs, io,
+    fs::{self, OpenOptions},
+    io,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +20,7 @@ pub use crate::asr::TranscriptionBackend;
 use crate::asr::{PARAKEET_LANGUAGES, WHISPER_LANGUAGES};
 
 const BUILT_IN_TEMPLATES: &[&str] = &["meeting", "lecture", "brief"];
+static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -652,21 +656,25 @@ fn write_private_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError>
         path: path.to_owned(),
         source,
     })?;
-    let temporary = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("config"),
-        std::process::id()
-    ));
+    ensure_safe_config_parent(parent).map_err(|source| ConfigError::Write {
+        path: path.to_owned(),
+        source,
+    })?;
+    let temporary = temporary_config_path(parent, path).map_err(|source| ConfigError::Write {
+        path: path.to_owned(),
+        source,
+    })?;
     let result = (|| -> io::Result<()> {
-        fs::write(&temporary, contents)?;
-        #[cfg(unix)]
-        fs::set_permissions(
-            &temporary,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )?;
-        fs::File::open(&temporary)?.sync_all()?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        use std::io::Write;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
         fs::rename(&temporary, path)?;
         fs::File::open(parent)?.sync_all()
     })();
@@ -678,6 +686,38 @@ fn write_private_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError>
         });
     }
     Ok(())
+}
+
+fn ensure_safe_config_parent(parent: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(parent)?;
+    if !metadata.file_type().is_dir() {
+        return Err(io::Error::other("configuration parent is not a directory"));
+    }
+    if metadata.permissions().mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "configuration parent must not be writable by group or other users",
+        ));
+    }
+    Ok(())
+}
+
+fn temporary_config_path(parent: &Path, path: &Path) -> io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    for _ in 0..128 {
+        let sequence = CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), sequence));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a private configuration temporary file",
+    ))
 }
 
 pub fn parse(input: &str) -> Result<LoadedConfig, ConfigError> {
@@ -901,6 +941,28 @@ mod tests {
             save_tui_settings(&path, &saved, &config),
             Err(ConfigError::Changed)
         ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_settings_save_refuses_a_group_writable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "sosus-config-shared-test-{}-{}",
+            std::process::id(),
+            CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+        let path = directory.join("config.toml");
+        let config = Config::default();
+
+        let error = save_tui_settings(&path, &ConfigFingerprint(None), &config).unwrap_err();
+
+        assert!(matches!(error, ConfigError::Write { .. }));
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 
