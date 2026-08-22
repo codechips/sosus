@@ -33,8 +33,14 @@ pub fn render(
             .enumerate()
             .map(|(index, meeting)| {
                 let marker = if index == selected { "▶ " } else { "  " };
+                let title = meeting.title.as_deref().unwrap_or("Untitled meeting");
+                let started = meeting
+                    .started_at
+                    .split('T')
+                    .next()
+                    .unwrap_or(meeting.started_at.as_str());
                 Line::styled(
-                    format!("{marker}#{}  {:.1}s", meeting.id, meeting.duration_s),
+                    format!("{marker}{started}  {title}"),
                     if index == selected {
                         theme::primary_text()
                     } else {

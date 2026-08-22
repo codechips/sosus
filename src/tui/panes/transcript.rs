@@ -24,16 +24,28 @@ pub fn render(
     };
     let mut lines = Vec::new();
     if let Some(summary) = summary {
-        lines.push(Line::styled(summary.body.clone(), theme::primary_text()));
+        lines.push(Line::styled("Summary", theme::accent_text()));
+        for line in summary.body.lines() {
+            if !line.is_empty() && !line.starts_with("## ") {
+                lines.push(Line::styled(line, theme::primary_text()));
+            }
+        }
+        lines.push(Line::raw(""));
     }
     if !segments.is_empty() {
-        lines.push(Line::styled("Transcript", theme::secondary_text()));
-        for segment in segments.iter().take(12) {
+        lines.push(Line::styled("Transcript", theme::accent_text()));
+        for segment in segments.iter().take(100) {
             let speaker = segment.speaker.as_deref().unwrap_or("Unknown");
             lines.push(Line::styled(
-                format!("{speaker}: {}", segment.text),
-                theme::primary_text(),
+                format!(
+                    "{}–{}  {speaker}",
+                    timestamp(segment.start_s),
+                    timestamp(segment.end_s)
+                ),
+                theme::secondary_text(),
             ));
+            lines.push(Line::styled(segment.text.clone(), theme::primary_text()));
+            lines.push(Line::raw(""));
         }
     }
     if lines.is_empty() {
@@ -53,4 +65,9 @@ pub fn render(
         Paragraph::new(body).block(block).wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn timestamp(seconds: f64) -> String {
+    let total = seconds.max(0.0).round() as u64;
+    format!("{:02}:{:02}", total / 60, total % 60)
 }
