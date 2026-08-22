@@ -967,11 +967,13 @@ mod tests {
             Meeting {
                 path: PathBuf::from("/tmp/one"),
                 name: "one".to_owned(),
+                duration_seconds: None,
                 transcript: Vec::new(),
             },
             Meeting {
                 path: PathBuf::from("/tmp/two"),
                 name: "two".to_owned(),
+                duration_seconds: None,
                 transcript: Vec::new(),
             },
         ];

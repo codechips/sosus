@@ -9,6 +9,7 @@ use std::{
 pub struct Meeting {
     pub path: PathBuf,
     pub name: String,
+    pub duration_seconds: Option<f64>,
     pub transcript: Vec<Segment>,
 }
 
@@ -37,6 +38,7 @@ fn load_meeting(path: PathBuf) -> io::Result<Meeting> {
         .unwrap_or("meeting")
         .to_owned();
     let transcript = path.join("transcript.md");
+    let recording = path.join("recording.wav");
     let segments = if transcript.is_file() {
         parse_transcript(&fs::read_to_string(transcript)?)?
     } else {
@@ -45,8 +47,15 @@ fn load_meeting(path: PathBuf) -> io::Result<Meeting> {
     Ok(Meeting {
         path,
         name,
+        duration_seconds: recording_duration_seconds(&recording),
         transcript: segments,
     })
+}
+
+fn recording_duration_seconds(path: &Path) -> Option<f64> {
+    let reader = hound::WavReader::open(path).ok()?;
+    let sample_rate = reader.spec().sample_rate;
+    (sample_rate > 0).then(|| reader.duration() as f64 / f64::from(sample_rate))
 }
 
 fn parse_transcript(markdown: &str) -> io::Result<Vec<Segment>> {
