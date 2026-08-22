@@ -235,10 +235,14 @@ async fn run_transcribe(
     let capabilities = backend.capabilities();
     let model_progress = ConsoleModelProgress::new();
     eprintln!("Preparing transcription...");
-    let model_dir =
-        models::ensure_asr_model(capabilities.id, app_paths.model_dir(), &model_progress)
-            .await
-            .context("could not prepare the transcription model")?;
+    let model_dir = models::ensure_asr_model(
+        capabilities.id,
+        &effective.effective.transcription.model,
+        app_paths.model_dir(),
+        &model_progress,
+    )
+    .await
+    .context("could not prepare the transcription model")?;
     model_progress.finish();
 
     eprintln!("Reading recording...");

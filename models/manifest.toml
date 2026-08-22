@@ -53,6 +53,108 @@ sha256 = "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
 bytes = 147951465
 
 [[models]]
+alias = "whisper-tiny"
+kind = "asr"
+asr_backend = "whisper"
+repository = "ggerganov/whisper.cpp"
+revision = "5359861c739e955e79d9a303bcbc70fb988958b1"
+origin_url = "https://huggingface.co/ggerganov/whisper.cpp"
+license = "MIT"
+attribution = "OpenAI Whisper tiny, converted to GGML and distributed by ggerganov/whisper.cpp"
+redirect_hosts = ["huggingface.co", "us.aws.cdn.hf.co"]
+
+[[models.files]]
+filename = "ggml-tiny.bin"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin"
+sha256 = "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"
+bytes = 77691713
+
+[[models]]
+alias = "whisper-small"
+kind = "asr"
+asr_backend = "whisper"
+repository = "ggerganov/whisper.cpp"
+revision = "5359861c739e955e79d9a303bcbc70fb988958b1"
+origin_url = "https://huggingface.co/ggerganov/whisper.cpp"
+license = "MIT"
+attribution = "OpenAI Whisper small, converted to GGML and distributed by ggerganov/whisper.cpp"
+redirect_hosts = ["huggingface.co", "us.aws.cdn.hf.co"]
+
+[[models.files]]
+filename = "ggml-small.bin"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin"
+sha256 = "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
+bytes = 487601967
+
+[[models]]
+alias = "whisper-medium"
+kind = "asr"
+asr_backend = "whisper"
+repository = "ggerganov/whisper.cpp"
+revision = "5359861c739e955e79d9a303bcbc70fb988958b1"
+origin_url = "https://huggingface.co/ggerganov/whisper.cpp"
+license = "MIT"
+attribution = "OpenAI Whisper medium, converted to GGML and distributed by ggerganov/whisper.cpp"
+redirect_hosts = ["huggingface.co", "us.aws.cdn.hf.co"]
+
+[[models.files]]
+filename = "ggml-medium.bin"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium.bin"
+sha256 = "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208"
+bytes = 1533763059
+
+[[models]]
+alias = "whisper-large-v3-turbo"
+kind = "asr"
+asr_backend = "whisper"
+repository = "ggerganov/whisper.cpp"
+revision = "5359861c739e955e79d9a303bcbc70fb988958b1"
+origin_url = "https://huggingface.co/ggerganov/whisper.cpp"
+license = "MIT"
+attribution = "OpenAI Whisper large-v3-turbo, converted to GGML and distributed by ggerganov/whisper.cpp"
+redirect_hosts = ["huggingface.co", "us.aws.cdn.hf.co"]
+
+[[models.files]]
+filename = "ggml-large-v3-turbo.bin"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo.bin"
+sha256 = "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"
+bytes = 1624555275
+
+[[models]]
+alias = "kb-whisper-base"
+kind = "asr"
+asr_backend = "whisper"
+repository = "KBLab/kb-whisper-base"
+revision = "1499d2d2f0c7ed545bd6f2eec85287cf8d8c8b38"
+origin_url = "https://huggingface.co/KBLab/kb-whisper-base"
+license = "Apache-2.0"
+attribution = "KB-Whisper Base, trained by KBLab at the National Library of Sweden"
+redirect_hosts = ["huggingface.co", "us.aws.cdn.hf.co"]
+
+[[models.files]]
+filename = "ggml-model.bin"
+url = "https://huggingface.co/KBLab/kb-whisper-base/resolve/1499d2d2f0c7ed545bd6f2eec85287cf8d8c8b38/ggml-model.bin"
+sha256 = "f5e3cdb33e537eedfa2a749b5cae28c4c511873a1b13362f87dffbe07891d3fe"
+bytes = 147951482
+
+[[models]]
+alias = "nb-whisper-small"
+kind = "asr"
+asr_backend = "whisper"
+repository = "NbAiLab/nb-whisper-small"
+revision = "e9bb5cb83cb74c96239fd506163aa97cff2fce4c"
+origin_url = "https://huggingface.co/NbAiLab/nb-whisper-small"
+license = "Apache-2.0"
+attribution = "NB-Whisper Small, trained by the National Library of Norway AI Lab"
+redirect_hosts = ["huggingface.co", "us.aws.cdn.hf.co"]
+
+[[models.files]]
+filename = "ggml-model.bin"
+url = "https://huggingface.co/NbAiLab/nb-whisper-small/resolve/e9bb5cb83cb74c96239fd506163aa97cff2fce4c/ggml-model.bin"
+sha256 = "a0fc1555f5bd51044b0ea88bb9b7891e1ee331a8087eddb0afc3a05839db48ab"
+bytes = 487601984
+
+[[models]]
 alias = "pyannote-segmentation-3-0-int8"
 kind = "diarization-segmentation"
 repository = "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0"

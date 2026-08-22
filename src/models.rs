@@ -318,11 +318,35 @@ pub async fn ensure_model(
 
 pub async fn ensure_asr_model(
     backend: &str,
+    selected: &str,
     model_root: &Path,
     progress: &dyn ModelProgressSink,
 ) -> Result<PathBuf, ModelError> {
+    let selected_path = Path::new(selected);
+    if !selected.is_empty() && selected_path.is_absolute() {
+        if selected_path.is_file() {
+            return selected_path.parent().map(Path::to_owned).ok_or_else(|| {
+                ModelError::InvalidManifest(format!(
+                    "custom model `{selected}` has no parent directory"
+                ))
+            });
+        }
+        return Err(ModelError::InvalidManifest(format!(
+            "custom Whisper model is not a readable file: {selected}"
+        )));
+    }
     let manifest = manifest()?;
-    let alias = manifest.asr_model(backend)?.alias.clone();
+    let alias = if selected.is_empty() {
+        manifest.asr_model(backend)?.alias.clone()
+    } else {
+        let model = manifest.model(selected)?;
+        if model.asr_backend.as_deref() != Some(backend) {
+            return Err(ModelError::InvalidManifest(format!(
+                "model `{selected}` is not compatible with the {backend} backend"
+            )));
+        }
+        model.alias.clone()
+    };
     ensure_model(&alias, model_root, progress).await
 }
 

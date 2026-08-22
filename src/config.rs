@@ -618,8 +618,12 @@ pub fn save_tui_settings(
     let transcription = table_mut(&mut document, "transcription");
     transcription["backend"] = value(config.transcription.backend.to_string());
     transcription["language"] = value(config.transcription.language.clone());
-    if config.transcription.backend == TranscriptionBackend::Parakeet {
+    if config.transcription.backend == TranscriptionBackend::Parakeet
+        || config.transcription.model.is_empty()
+    {
         transcription.remove("model");
+    } else {
+        transcription["model"] = value(config.transcription.model.clone());
     }
 
     let diarization = table_mut(&mut document, "diarization");

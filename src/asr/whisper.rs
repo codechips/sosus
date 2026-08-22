@@ -1,6 +1,10 @@
 //! whisper.cpp transcription backend.
 
-use std::{path::Path, sync::Once};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Once,
+};
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -9,7 +13,6 @@ use super::{
     TranscribeOptions, Transcriber, TranscriptResult, WHISPER_CAPABILITIES,
 };
 
-const MODEL_FILENAME: &str = "ggml-base.bin";
 static INSTALL_LOGGING_HOOKS: Once = Once::new();
 
 pub struct WhisperTranscriber {
@@ -47,8 +50,7 @@ impl Transcriber for WhisperTranscriber {
             });
         }
 
-        let path = options.model_dir.join(MODEL_FILENAME);
-        require_model_file(&path, self.capabilities().id)?;
+        let path = model_file(&options.model_dir)?;
         INSTALL_LOGGING_HOOKS.call_once(whisper_rs::install_logging_hooks);
         let mut parameters = WhisperContextParameters::new();
         parameters.use_gpu(true);
@@ -145,13 +147,35 @@ impl Transcriber for WhisperTranscriber {
     }
 }
 
-fn require_model_file(path: &Path, backend: &'static str) -> Result<(), AsrError> {
-    if path.is_file() {
-        Ok(())
+fn model_file(model_dir: &Path) -> Result<PathBuf, AsrError> {
+    let candidates = fs::read_dir(model_dir)
+        .map_err(|error| AsrError::BackendInitialization {
+            backend: WHISPER_CAPABILITIES.id,
+            reason: format!(
+                "could not read model directory {}: {error}",
+                model_dir.display()
+            ),
+        })?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("bin" | "ggml" | "gguf")
+            )
+        })
+        .collect::<Vec<_>>();
+    if candidates.len() == 1 {
+        Ok(candidates.into_iter().next().expect("one candidate"))
     } else {
         Err(AsrError::BackendInitialization {
-            backend,
-            reason: format!("required model file is missing: {}", path.display()),
+            backend: WHISPER_CAPABILITIES.id,
+            reason: format!(
+                "expected exactly one Whisper GGML/GGUF model file in {}; found {}",
+                model_dir.display(),
+                candidates.len()
+            ),
         })
     }
 }
@@ -178,7 +202,7 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(error.to_string().contains(MODEL_FILENAME));
+        assert!(error.to_string().contains("exactly one Whisper"));
         fs::remove_dir_all(directory).unwrap();
     }
 }
