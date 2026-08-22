@@ -9,6 +9,7 @@ use ratatui::{
 
 use crate::tui::theme;
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -16,6 +17,8 @@ pub fn render(
     elapsed_seconds: Option<f64>,
     last_recording: Option<&str>,
     input_levels: Option<(f32, f32)>,
+    spectrum: &[f32],
+    pipeline_status: Option<&str>,
 ) {
     let title = if focused {
         "▶ Recording"
@@ -45,6 +48,11 @@ pub fn render(
                 input_levels.map_or(0.0, |levels| levels.1),
                 meter_width,
             ),
+            spectrum_line(spectrum, meter_width),
+            Line::styled(
+                pipeline_status.map_or("Pipeline  recording", |status| status),
+                theme::secondary_text(),
+            ),
             Line::styled("r or Ctrl+C to stop", theme::secondary_text()),
         ])
     } else {
@@ -73,6 +81,33 @@ pub fn render(
         Paragraph::new(body).block(block).wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn spectrum_line(levels: &[f32], width: usize) -> Line<'static> {
+    let available = width.max(1);
+    let bars = if levels.is_empty() {
+        "·".repeat(available)
+    } else {
+        let count = levels.len().min(available);
+        levels
+            .iter()
+            .take(count)
+            .map(|level| match (level * 8.0).round() as u8 {
+                0 => '▁',
+                1 => '▂',
+                2 => '▃',
+                3 => '▄',
+                4 => '▅',
+                5 => '▆',
+                6 => '▇',
+                _ => '█',
+            })
+            .collect::<String>()
+    };
+    Line::from(vec![
+        Span::styled("Audio  ", theme::secondary_text()),
+        Span::styled(bars, theme::accent_text()),
+    ])
 }
 
 fn meter_line(label: &str, level: f32, width: usize) -> Line<'static> {

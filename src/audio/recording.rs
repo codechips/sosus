@@ -11,6 +11,8 @@ use super::{
 };
 
 const SOURCE_BUFFER_FRAMES: usize = 8_192;
+const SPECTRUM_SAMPLE_COUNT: usize = 256;
+const SPECTRUM_BUFFER_CAPACITY: usize = SPECTRUM_SAMPLE_COUNT * 4;
 const DEFAULT_GAIN: f32 = 0.707_945_76; // -3 dB
 
 /// A live core recording. Call [`pump`](Self::pump) regularly from a non-real-time task.
@@ -35,6 +37,8 @@ pub struct RecordingSession {
     microphone_failed: bool,
     system_peak: f32,
     microphone_peak: f32,
+    spectrum_samples: VecDeque<f32>,
+    spectrum_levels: Vec<f32>,
 }
 
 impl RecordingSession {
@@ -67,6 +71,8 @@ impl RecordingSession {
             microphone_failed: false,
             system_peak: 0.0,
             microphone_peak: 0.0,
+            spectrum_samples: VecDeque::with_capacity(SPECTRUM_BUFFER_CAPACITY),
+            spectrum_levels: Vec::new(),
         })
     }
 
@@ -119,6 +125,54 @@ impl RecordingSession {
 
     pub fn input_levels(&self) -> (f32, f32) {
         (self.system_peak, self.microphone_peak)
+    }
+
+    /// Return smoothed logarithmic frequency-band levels for the live visualizer.
+    pub fn spectrum(&mut self, bands: usize) -> Vec<f32> {
+        if bands == 0 || self.spectrum_samples.len() < SPECTRUM_SAMPLE_COUNT {
+            return Vec::new();
+        }
+        let samples = self
+            .spectrum_samples
+            .iter()
+            .rev()
+            .take(SPECTRUM_SAMPLE_COUNT)
+            .copied()
+            .collect::<Vec<_>>();
+        let mut levels = Vec::with_capacity(bands);
+        for band in 0..bands {
+            let minimum_bin = 1.0_f32;
+            let maximum_bin = (SPECTRUM_SAMPLE_COUNT / 2) as f32;
+            let ratio = maximum_bin / minimum_bin;
+            let start = (minimum_bin * ratio.powf(band as f32 / bands as f32)) as usize;
+            let end = (minimum_bin * ratio.powf((band + 1) as f32 / bands as f32)) as usize;
+            let mut energy = 0.0_f32;
+            for bin in start..end.max(start + 1) {
+                let mut real = 0.0_f32;
+                let mut imaginary = 0.0_f32;
+                for (index, sample) in samples.iter().enumerate() {
+                    let angle = 2.0 * std::f32::consts::PI * bin as f32 * index as f32
+                        / SPECTRUM_SAMPLE_COUNT as f32;
+                    let window = 0.5
+                        * (1.0
+                            - (2.0 * std::f32::consts::PI * index as f32
+                                / (SPECTRUM_SAMPLE_COUNT - 1) as f32)
+                                .cos());
+                    real += sample * window * angle.cos();
+                    imaginary -= sample * window * angle.sin();
+                }
+                energy += (real * real + imaginary * imaginary).sqrt();
+            }
+            let normalized = (energy / (end.max(start + 1) - start) as f32 / 24.0).clamp(0.0, 1.0);
+            levels.push(normalized);
+        }
+        if self.spectrum_levels.len() != bands {
+            self.spectrum_levels = vec![0.0; bands];
+        }
+        for (previous, current) in self.spectrum_levels.iter_mut().zip(levels) {
+            *previous = (*previous * 0.65 + current * 0.35).clamp(0.0, 1.0);
+        }
+        self.spectrum_levels.clone()
     }
 
     fn drain_microphone(&mut self) {
@@ -181,6 +235,12 @@ impl RecordingSession {
             let microphone = self.microphone_ready.pop_front().unwrap_or(0.0);
             self.mix
                 .push((system * DEFAULT_GAIN + microphone * DEFAULT_GAIN).clamp(-1.0, 1.0));
+        }
+        for sample in &self.mix {
+            self.spectrum_samples.push_back(*sample);
+        }
+        while self.spectrum_samples.len() > SPECTRUM_BUFFER_CAPACITY {
+            self.spectrum_samples.pop_front();
         }
         self.sink.write_samples(&self.mix)?;
         Ok(())

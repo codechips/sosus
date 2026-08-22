@@ -99,6 +99,7 @@ struct App {
     transcript: Vec<Segment>,
     transcript_scroll: u16,
     input_levels: Option<(f32, f32)>,
+    spectrum: Vec<f32>,
 }
 
 impl App {
@@ -121,6 +122,7 @@ impl App {
             transcript: Vec::new(),
             transcript_scroll: 0,
             input_levels: None,
+            spectrum: Vec::new(),
         }
     }
 
@@ -240,6 +242,7 @@ impl App {
             return Ok(None);
         };
         self.input_levels = None;
+        self.spectrum.clear();
         self.recording_context
             .as_ref()
             .context("recording is not configured")?;
@@ -265,6 +268,7 @@ impl App {
         if let Some(active) = &mut self.recording {
             active.session.pump()?;
             self.input_levels = Some(active.session.input_levels());
+            self.spectrum = active.session.spectrum(24);
         }
         Ok(())
     }
@@ -298,18 +302,23 @@ impl App {
             return;
         }
 
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(22),
-                Constraint::Percentage(58),
-                Constraint::Percentage(20),
-            ])
-            .split(area);
-        let right = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(columns[2]);
+        let (columns, recording_area) = if self.recording.is_some() {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+                .split(area);
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(24), Constraint::Percentage(76)])
+                .split(rows[0]);
+            (columns, Some(rows[1]))
+        } else {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(24), Constraint::Percentage(76)])
+                .split(area);
+            (columns, None)
+        };
 
         panes::meetings::render(
             frame,
@@ -326,17 +335,20 @@ impl App {
             &self.transcript,
             self.transcript_scroll,
         );
-        panes::recording::render(
-            frame,
-            right[0],
-            self.focus == Focus::Recording,
-            self.recording
-                .as_ref()
-                .map(|active| active.session.elapsed_seconds()),
-            self.last_recording.as_deref(),
-            self.input_levels,
-        );
-        widgets::progress::render(frame, right[1], self.pipeline_status.as_deref());
+        if let Some(recording_area) = recording_area {
+            panes::recording::render(
+                frame,
+                recording_area,
+                self.focus == Focus::Recording,
+                self.recording
+                    .as_ref()
+                    .map(|active| active.session.elapsed_seconds()),
+                self.last_recording.as_deref(),
+                self.input_levels,
+                &self.spectrum,
+                self.pipeline_status.as_deref(),
+            );
+        }
 
         if let Some(error) = &self.error {
             render_notice(frame, "Error", error, centered_rect(70, 42, area));
@@ -900,7 +912,6 @@ mod tests {
             "Recording",
             "No meetings yet",
             "Select a meeting",
-            "READY",
         ] {
             assert!(rendered.contains(content), "missing content: {content}");
         }
