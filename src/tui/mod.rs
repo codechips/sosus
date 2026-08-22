@@ -233,7 +233,7 @@ impl App {
             meeting_dir,
         });
         self.input_levels = Some((0.0, 0.0));
-        self.message = Some("Recording started".to_owned());
+        self.message = None;
         Ok(())
     }
 
@@ -308,17 +308,17 @@ impl App {
                 // Keep the recording controls in a compact, predictable lower pane. A
                 // fixed height also prevents the visualizer from swallowing the explorer
                 // and transcript when the terminal is tall.
-                .constraints([Constraint::Min(8), Constraint::Length(14)])
+                .constraints([Constraint::Min(8), Constraint::Length(7)])
                 .split(area);
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(24), Constraint::Percentage(76)])
+                .constraints([Constraint::Length(28), Constraint::Min(40)])
                 .split(rows[0]);
             (columns, Some(rows[1]))
         } else {
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(24), Constraint::Percentage(76)])
+                .constraints([Constraint::Length(28), Constraint::Min(40)])
                 .split(area);
             (columns, None)
         };
@@ -327,7 +327,6 @@ impl App {
             frame,
             columns[0],
             self.focus == Focus::Meetings,
-            &self.archive_dir,
             &self.meetings,
             self.selected_meeting,
         );
@@ -349,7 +348,6 @@ impl App {
                 self.last_recording.as_deref(),
                 self.input_levels,
                 &self.spectrum,
-                self.pipeline_status.as_deref(),
             );
         }
 
@@ -909,7 +907,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        for content in ["No meetings yet", "Select a meeting"] {
+        for content in ["No recordings", "Choose a recording"] {
             assert!(rendered.contains(content), "missing content: {content}");
         }
     }

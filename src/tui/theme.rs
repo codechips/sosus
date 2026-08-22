@@ -12,16 +12,6 @@ pub fn pane_border(focused: bool) -> Style {
     }
 }
 
-pub fn pane_title(focused: bool) -> Style {
-    if focused {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    }
-}
-
 pub fn primary_text() -> Style {
     Style::default().fg(Color::White)
 }
@@ -32,6 +22,10 @@ pub fn secondary_text() -> Style {
 
 pub fn accent_text() -> Style {
     Style::default().fg(Color::Cyan)
+}
+
+pub fn selected_row() -> Style {
+    Style::default().fg(Color::White).bg(Color::DarkGray)
 }
 
 pub fn warning_text() -> Style {

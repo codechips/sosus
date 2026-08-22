@@ -16,29 +16,20 @@ pub fn render(
     area: Rect,
     focused: bool,
     elapsed_seconds: Option<f64>,
-    last_recording: Option<&str>,
+    _last_recording: Option<&str>,
     input_levels: Option<(f32, f32)>,
     spectrum: &[f32],
-    pipeline_status: Option<&str>,
 ) {
-    let title = if focused {
-        "▶ Recording"
-    } else {
-        "Recording"
-    };
-    let meter_width = area.width.saturating_sub(10).clamp(10, 28) as usize;
+    let meter_width = area.width.saturating_sub(10).clamp(10, 18) as usize;
     let body = if let Some(elapsed) = elapsed_seconds {
         let minutes = elapsed as u64 / 60;
         let seconds = elapsed as u64 % 60;
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("Status  ", theme::secondary_text()),
-                Span::styled("RECORDING", theme::warning_text()),
+                Span::styled("● ", theme::warning_text()),
+                Span::styled("Recording  ", theme::primary_text()),
+                Span::styled(format!("{minutes:02}:{seconds:02}"), theme::accent_text()),
             ]),
-            Line::styled(
-                format!("Elapsed {minutes:02}:{seconds:02}"),
-                theme::primary_text(),
-            ),
             meter_line(
                 "System",
                 input_levels.map_or(0.0, |levels| levels.0),
@@ -54,35 +45,14 @@ pub fn render(
             spectrum,
             area.width.saturating_sub(4) as usize,
         ));
-        lines.extend([
-            Line::styled(
-                pipeline_status.map_or("Pipeline  recording", |status| status),
-                theme::secondary_text(),
-            ),
-            Line::styled("r or Ctrl+C to stop", theme::secondary_text()),
-        ]);
+        lines.push(Line::styled("r to stop", theme::secondary_text()));
         Text::from(lines)
     } else {
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("Status  ", theme::secondary_text()),
-                Span::styled("READY", theme::primary_text()),
-            ]),
-            Line::styled("r to start recording", theme::secondary_text()),
-        ];
-        if let Some(path) = last_recording {
-            lines.push(Line::styled(
-                format!("Saved {path}"),
-                theme::secondary_text(),
-            ));
-        }
-        Text::from(lines)
+        Text::from(Line::styled("r to record", theme::secondary_text()))
     };
     let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(theme::pane_border(focused))
-        .title_style(theme::pane_title(focused));
+        .borders(Borders::TOP)
+        .border_style(theme::pane_border(focused));
 
     frame.render_widget(
         Paragraph::new(body).block(block).wrap(Wrap { trim: true }),
@@ -113,9 +83,9 @@ fn spectrum_line(levels: &[f32], width: usize) -> Line<'static> {
 
 fn spectrum_style(level: f32) -> Style {
     let position = level.clamp(0.0, 1.0);
-    let red = (40.0 + position * 180.0) as u8;
-    let green = (150.0 + position * 70.0) as u8;
-    let blue = (235.0 - position * 120.0) as u8;
+    let red = (48.0 + position * 207.0) as u8;
+    let green = (58.0 + position * 162.0) as u8;
+    let blue = (70.0 + position * 42.0) as u8;
     Style::default().fg(Color::Rgb(red, green, blue))
 }
 
