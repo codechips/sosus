@@ -88,6 +88,7 @@ struct App {
     focus: Focus,
     show_help: bool,
     show_settings: bool,
+    confirm_quit_processing: bool,
     should_quit: bool,
     message: Option<String>,
     warnings: VecDeque<String>,
@@ -112,6 +113,7 @@ impl App {
             focus: Focus::Meetings,
             show_help: false,
             show_settings: false,
+            confirm_quit_processing: false,
             should_quit: false,
             message: None,
             warnings: startup.warnings.into(),
@@ -162,6 +164,17 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppAction> {
+        if self.confirm_quit_processing {
+            match (key.code, key.modifiers) {
+                (KeyCode::Enter, _) => self.should_quit = true,
+                (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+                    self.confirm_quit_processing = false;
+                }
+                _ => {}
+            }
+            return None;
+        }
+
         if self.error.is_some() {
             match (key.code, key.modifiers) {
                 (KeyCode::Esc | KeyCode::Enter, _) => {
@@ -206,6 +219,11 @@ impl App {
             }
             (KeyCode::Char('q'), _) if self.recording.is_some() => {
                 return Some(AppAction::StopRecordingAndQuit);
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _)
+                if self.pipeline_active =>
+            {
+                self.confirm_quit_processing = true;
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
                 self.should_quit = true;
@@ -372,6 +390,8 @@ impl App {
             render_help(frame, centered_rect(64, 68, area));
         } else if self.show_settings {
             render_settings_preview(frame, centered_rect(64, 50, area));
+        } else if self.confirm_quit_processing {
+            render_quit_processing_confirmation(frame, centered_rect(54, 28, area));
         }
         render_status_bar(frame, area, self);
     }
@@ -789,6 +809,25 @@ fn render_notice(frame: &mut Frame<'_>, title: &str, message: &str, area: Rect) 
     );
 }
 
+fn render_quit_processing_confirmation(frame: &mut Frame<'_>, area: Rect) {
+    let content = Text::from(vec![
+        Line::styled("Transcription is still processing.", theme::warning_text()),
+        Line::from(""),
+        Line::styled("Quit while it is still running?", theme::primary_text()),
+        Line::from(""),
+        Line::styled(
+            "Enter to quit · Esc or q to continue",
+            theme::secondary_text(),
+        ),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Processing")
+        .style(theme::overlay());
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(content).block(block), area);
+}
+
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let status = if let Some(active) = &app.recording {
         let elapsed = active.session.elapsed_seconds() as u64;
@@ -874,6 +913,23 @@ mod tests {
             let _ = app.handle_key(key);
             assert!(app.should_quit);
         }
+    }
+
+    #[test]
+    fn quitting_during_processing_requires_confirmation() {
+        let mut app = app();
+        app.pipeline_active = true;
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.confirm_quit_processing);
+        assert!(!app.should_quit);
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.confirm_quit_processing);
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.should_quit);
     }
 
     #[test]
