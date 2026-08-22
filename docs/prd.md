@@ -73,6 +73,7 @@ Nothing leaves the machine. The only network access is downloading model weights
 - A GUI, menu bar app, web interface or HTTP API.
 - Editing transcripts by hand.
 - Translation. Transcribe in the source language only.
+- Automatic archive retention or cleanup. Recordings remain until the user deletes them.
 
 ---
 
@@ -169,11 +170,10 @@ Recording a meeting captures other people's voices, which is personal data. Thes
 - **NFR-PRIV-2** The only permitted outbound network traffic is model weight downloads whose origin and redirect hosts appear in the source-controlled model manifest. User-configured HuggingFace models use the same fixed host allowlist. Any other outbound connection is a defect.
 - **NFR-PRIV-3** Disable third-party library telemetry explicitly rather than relying on defaults (for example `HF_HUB_DISABLE_TELEMETRY=1` before any HuggingFace Hub call).
 - **NFR-PRIV-4** Audio, transcripts, summaries and the database live only under user-controlled paths. Meeting folders default to `~/sosus/recordings/`; models, the database and logs default to `~/.local/share/sosus/`.
-- **NFR-PRIV-5** A retention control must exist: `retention_days` in config, and a `cleanup` command that deletes audio and derived data older than that. Default is unlimited, but the mechanism must ship in v1.
-- **NFR-PRIV-6** Deleting a meeting from the TUI must remove its transcript, summary, passages, embeddings, chats and owned artifacts, with no orphan rows. It deletes audio only when `audio_owned = 1`; a user-supplied import is dereferenced but never deleted.
-- **NFR-PRIV-7** Directories created by sosus use mode `0700`; files containing meeting data, config, database state or logs use mode `0600`. Do not loosen permissions on an existing user-created output directory.
-- **NFR-PRIV-8** Logs must never contain transcript text, chat questions or answers, vocabulary terms, audio samples, prompts, or generated summaries. Log stable IDs, stage names, timings, sizes and redacted error categories only. Rotate at 5 MiB, retain five files, and store them under `~/.local/share/sosus/logs/`.
-- **NFR-PRIV-9** Sosus does not provide application-level encryption and does not require FileVault. It relies on macOS user-account isolation and the `0700` directory and `0600` file permissions above. FileVault remains an optional operating-system choice outside the product contract.
+- **NFR-PRIV-5** Deleting a sosus-created meeting from the TUI moves its complete meeting folder to Finder's Trash. Imported source audio remains in its original location and is never deleted.
+- **NFR-PRIV-6** Directories created by sosus use mode `0700`; files containing meeting data, config, or logs use mode `0600`. Do not loosen permissions on an existing user-created output directory.
+- **NFR-PRIV-7** Logs must never contain transcript text, vocabulary terms, audio samples, prompts, or generated summaries. Log stable IDs, stage names, timings, sizes and redacted error categories only. Rotate at 5 MiB, retain five files, and store them under `~/.local/share/sosus/logs/`.
+- **NFR-PRIV-8** Sosus does not provide application-level encryption and does not require FileVault. It relies on macOS user-account isolation and the `0700` directory and `0600` file permissions above. FileVault remains an optional operating-system choice outside the product contract.
 
 #### 4.4.1 Default on-disk layout
 
@@ -964,7 +964,6 @@ rrf_k             = 60
 dir               = "~/sosus/recordings"
 json              = false      # false = Markdown only; true = Markdown + JSON
 keep_recording    = true
-retention_days    = 0          # 0 = keep forever
 
 # [templates.my-notes]
 # system_prompt = "..."
@@ -1001,7 +1000,6 @@ With no subcommand, launch the TUI only when stdin and stdout are terminals. `so
 | `sosus devices` | List audio input devices |
 | `sosus apps` | List running processes with PIDs for `capture_mode = "processes"` |
 | `sosus config` | Open config in `$EDITOR` |
-| `sosus cleanup` | Apply retention policy, or remove data with explicit flags |
 
 `<meeting>` accepts a numeric database ID or an exact meeting-directory name such as `2026-08-21_1430_2`. A missing name is an error that prints matching candidates without modifying anything.
 
@@ -1052,14 +1050,11 @@ These override config for one invocation and appear only on commands where they 
 | `--limit <n>` | `meetings`, `search` | Limit returned rows; must be at least 1 |
 | `--recursive` / `--no-recursive` | `import` | Explicitly control traversal; D15 chooses the default |
 | `--stage <stage>` | `resume` | Resume from this stage only after validating/invalidation of downstream state |
-| `--yes` | `delete`, `cleanup` | Skip confirmation after resolving and previewing the exact target set |
-| `--older-than <days>` | `cleanup` | Override configured retention age for this run |
-| `--audio-only` | `cleanup` | Delete eligible owned audio but preserve derived data |
 
 - **FR-CLI-1** `--json` writes exactly one JSON document to stdout on success. On failure it writes one JSON error document to stderr and nothing to stdout. Progress is suppressed in JSON mode.
 - **FR-CLI-2** In human mode, result data and final artifact paths go to stdout; progress and warnings go to stderr. ANSI output is used only when that stream is a terminal.
 - **FR-CLI-3** Exit codes are: `0` success including warnings/no speech; `1` runtime failure; `2` invalid CLI or configuration; `3` partial batch failure; `130` cancellation by signal. The first `Ctrl+C` while recording remains the clean stop specified by FR-REC-9; a second `Ctrl+C` cancels and exits 130.
-- **FR-CLI-4** `delete` and `cleanup` require confirmation unless `--yes`, and print the resolved files and sizes before asking. In `--json` mode they require `--yes`; never prompt on a non-terminal.
+- **FR-CLI-4** `delete` requires confirmation unless `--yes`, and prints the resolved folder before asking. In `--json` mode it requires `--yes`; never prompt on a non-terminal.
 - **FR-CLI-5** Every durable meeting capability has a non-interactive CLI path. The TUI may provide more convenient navigation, but it is never required for recording, processing, retrieval, export, deletion or recovery; invocation flags cover temporary configuration overrides.
 
 ---
@@ -1195,7 +1190,7 @@ Harden the core recording slice with per-process Core Audio tap capture, adaptiv
 
 ### M4 — Release engineering
 
-Manually signed and notarized release binary and `.pkg`, immutable release tag and checksums, third-party Homebrew tap installing the signed upstream binary, retention policy and cleanup, Settings modal, help overlay, README, `SECURITY.md`, and complete third-party model notices.
+Manually signed and notarized release binary and `.pkg`, immutable release tag and checksums, third-party Homebrew tap installing the signed upstream binary, Settings modal, help overlay, README, `SECURITY.md`, and complete third-party model notices.
 
 **Exit:** A fresh Mac installs from the `.pkg`, grants permissions when prompted, changes a common setting in the TUI, and records a meeting without editing a file or changing a terminal setting. The saved TOML retains pre-existing comments and unknown keys, and an externally modified config is never overwritten. On a second fresh test account, `brew install <tap>/sosus` installs the same release and the installed executable passes signature verification, receives both required permissions, and records both system and microphone audio. Official Homebrew submission is a later distribution step, not an M4 exit criterion controlled by this project.
 
@@ -1284,7 +1279,7 @@ Use adjustable `system_gain_db` and `mic_gain_db`, both defaulting to `-3.0` dB,
 
 - **A — `d` plus confirmation (recommended):** show the exact owned and derived files and total size; imported source audio is explicitly labelled “preserved”.
 - **B — `D` plus confirmation:** harder to trigger accidentally, but less discoverable.
-- **C — CLI-only deletion:** remove TUI deletion from v1 and use `sosus delete <meeting>`; this changes NFR-PRIV-6.
+- **C — CLI-only deletion:** remove TUI deletion from v1 and use `sosus delete <meeting>`; this changes NFR-PRIV-5.
 
 **D7 — Chat scope and citation controls (before M2)**
 
@@ -1318,7 +1313,7 @@ Use adjustable `system_gain_db` and `mic_gain_db`, both defaulting to `-3.0` dB,
 
 **D12 — Encryption at rest (resolved)**
 
-Sosus adds no application-level encryption and does not require FileVault. It relies on macOS user-account isolation and restrictive filesystem permissions as specified by NFR-PRIV-7 and NFR-PRIV-9.
+Sosus adds no application-level encryption and does not require FileVault. It relies on macOS user-account isolation and restrictive filesystem permissions as specified by NFR-PRIV-6 and NFR-PRIV-8.
 
 **D13 — Performance reference hardware (before M1 benchmarking)**
 

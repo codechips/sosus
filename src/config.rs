@@ -305,7 +305,6 @@ pub struct OutputConfig {
     pub dir: PathBuf,
     pub json: bool,
     pub keep_recording: bool,
-    pub retention_days: u64,
 }
 
 impl Default for OutputConfig {
@@ -314,7 +313,6 @@ impl Default for OutputConfig {
             dir: PathBuf::from("~/sosus/recordings"),
             json: false,
             keep_recording: true,
-            retention_days: 0,
         }
     }
 }
