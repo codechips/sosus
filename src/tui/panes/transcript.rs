@@ -11,14 +11,8 @@ use crate::archive::Segment;
 use crate::tui::theme;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, focused: bool, segments: &[Segment], scroll: u16) {
-    let title = if focused {
-        "▶ Transcript"
-    } else {
-        "Transcript"
-    };
     let mut lines = Vec::new();
     if !segments.is_empty() {
-        lines.push(Line::styled("Transcript", theme::accent_text()));
         for segment in segments.iter().take(100) {
             let speaker = segment.speaker.as_deref().unwrap_or("Unknown");
             lines.push(Line::styled(
@@ -42,7 +36,6 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, focused: bool, segments: &[Segm
     let body = Text::from(lines);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(title)
         .border_style(theme::pane_border(focused))
         .title_style(theme::pane_title(focused));
 

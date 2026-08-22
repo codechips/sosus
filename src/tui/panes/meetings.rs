@@ -18,7 +18,6 @@ pub fn render(
     meetings: &[Meeting],
     selected: usize,
 ) {
-    let title = if focused { "▶ Meetings" } else { "Meetings" };
     let mut lines = if meetings.is_empty() {
         vec![
             Line::styled("No meetings yet", theme::primary_text()),
@@ -49,7 +48,6 @@ pub fn render(
     let body = Text::from(lines);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(title)
         .border_style(theme::pane_border(focused))
         .title_style(theme::pane_title(focused));
 

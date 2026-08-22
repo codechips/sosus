@@ -906,13 +906,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        for content in [
-            "Meetings",
-            "Transcript",
-            "Recording",
-            "No meetings yet",
-            "Select a meeting",
-        ] {
+        for content in ["No meetings yet", "Select a meeting"] {
             assert!(rendered.contains(content), "missing content: {content}");
         }
     }
@@ -939,7 +933,6 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Transcript"));
         assert!(!rendered.contains("Terminal too small"));
     }
 }
