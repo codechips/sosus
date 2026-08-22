@@ -9,7 +9,8 @@ use std::{
     collections::VecDeque,
     io::{self, Stdout},
     panic,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -229,6 +230,11 @@ impl App {
                 self.should_quit = true;
             }
             (KeyCode::Char('r'), _) => return Some(AppAction::ToggleRecording),
+            (KeyCode::Char('o'), _) => {
+                if let Some(meeting) = self.meetings.get(self.selected_meeting) {
+                    return Some(AppAction::OpenMeetingFolder(meeting.path.clone()));
+                }
+            }
             (KeyCode::Char('?'), _) => self.show_help = !self.show_help,
             (KeyCode::F(2), _) => self.show_settings = !self.show_settings,
             (KeyCode::Tab, KeyModifiers::SHIFT) | (KeyCode::BackTab, _) => {
@@ -412,11 +418,12 @@ struct ActiveRecording {
     meeting_dir: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AppAction {
     ToggleRecording,
     StopRecording,
     StopRecordingAndQuit,
+    OpenMeetingFolder(PathBuf),
 }
 
 pub async fn run(startup: Startup) -> anyhow::Result<()> {
@@ -485,6 +492,11 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                                     Ok(Some(_)) => app.should_quit = true,
                                     Ok(None) => app.should_quit = true,
                                     Err(error) => app.error = Some(format!("{error:#}")),
+                                }
+                            }
+                            Some(AppAction::OpenMeetingFolder(path)) => {
+                                if let Err(error) = open_meeting_folder(&path) {
+                                    app.error = Some(format!("{error:#}"));
                                 }
                             }
                             None => {}
@@ -589,6 +601,14 @@ fn launch_pipeline(
             }
         }
     });
+}
+
+fn open_meeting_folder(path: &Path) -> anyhow::Result<()> {
+    Command::new("open")
+        .arg(path)
+        .spawn()
+        .with_context(|| format!("could not open {} in Finder", path.display()))?;
+    Ok(())
 }
 
 type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
@@ -764,6 +784,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("Tab / Shift+Tab  Move focus"),
         Line::from("F2               Settings preview"),
         Line::from("r                Start / stop recording"),
+        Line::from("o                Open selected recording in Finder"),
         Line::from("?                Toggle help"),
         Line::from("q                Stop recording and quit"),
         Line::from("Ctrl+C           Stop recording, otherwise quit"),
@@ -938,6 +959,22 @@ mod tests {
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
             Some(AppAction::ToggleRecording)
+        );
+    }
+
+    #[test]
+    fn open_key_requests_the_selected_meeting_folder() {
+        let mut app = app();
+        app.meetings = vec![Meeting {
+            path: PathBuf::from("/tmp/meeting"),
+            name: "meeting".to_owned(),
+            duration_seconds: None,
+            transcript: Vec::new(),
+        }];
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
+            Some(AppAction::OpenMeetingFolder(PathBuf::from("/tmp/meeting")))
         );
     }
 
