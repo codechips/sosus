@@ -109,6 +109,7 @@ struct App {
     summary: Option<Summary>,
     transcript: Vec<Segment>,
     transcript_scroll: u16,
+    input_levels: Option<(f32, f32)>,
 }
 
 impl App {
@@ -132,6 +133,7 @@ impl App {
             summary: None,
             transcript: Vec::new(),
             transcript_scroll: 0,
+            input_levels: None,
         }
     }
 
@@ -250,6 +252,7 @@ impl App {
             started_at,
             meeting_dir,
         });
+        self.input_levels = Some((0.0, 0.0));
         self.message = Some("Recording started".to_owned());
         Ok(())
     }
@@ -258,6 +261,7 @@ impl App {
         let Some(active) = self.recording.take() else {
             return Ok(None);
         };
+        self.input_levels = None;
         let context = self
             .recording_context
             .as_ref()
@@ -306,6 +310,7 @@ impl App {
     fn pump_recording(&mut self) -> anyhow::Result<()> {
         if let Some(active) = &mut self.recording {
             active.session.pump()?;
+            self.input_levels = Some(active.session.input_levels());
         }
         Ok(())
     }
@@ -381,6 +386,7 @@ impl App {
                 .as_ref()
                 .map(|active| active.session.elapsed_seconds()),
             self.last_recording.as_deref(),
+            self.input_levels,
         );
         widgets::progress::render(frame, right[2], self.pipeline_status.as_deref());
 

@@ -33,6 +33,8 @@ pub struct RecordingSession {
     system_dropouts: u64,
     microphone_dropouts: u64,
     microphone_failed: bool,
+    system_peak: f32,
+    microphone_peak: f32,
 }
 
 impl RecordingSession {
@@ -63,11 +65,15 @@ impl RecordingSession {
             system_dropouts: 0,
             microphone_dropouts: 0,
             microphone_failed: false,
+            system_peak: 0.0,
+            microphone_peak: 0.0,
         })
     }
 
     /// Drain queued callback data, mix it, and append it to the WAV.
     pub fn pump(&mut self) -> Result<(), RecordingError> {
+        self.system_peak *= 0.82;
+        self.microphone_peak *= 0.82;
         if self.system_reader.stream_failed() {
             return Err(RecordingError::SystemStreamFailed);
         }
@@ -111,6 +117,10 @@ impl RecordingSession {
         self.started.elapsed().as_secs_f64()
     }
 
+    pub fn input_levels(&self) -> (f32, f32) {
+        (self.system_peak, self.microphone_peak)
+    }
+
     fn drain_microphone(&mut self) {
         let dropped = self.microphone_reader.take_dropped_frames();
         self.microphone_dropouts = self.microphone_dropouts.saturating_add(dropped);
@@ -130,6 +140,9 @@ impl RecordingSession {
             }
             self.microphone_converter
                 .process(&self.microphone_input[..count], &mut self.microphone_output);
+            self.microphone_peak = self
+                .microphone_peak
+                .max(peak(&self.microphone_input[..count]));
             self.microphone_ready
                 .extend(self.microphone_output.iter().copied());
         }
@@ -151,6 +164,7 @@ impl RecordingSession {
             }
             self.system_converter
                 .process(&self.system_input[..count], &mut self.system_output);
+            self.system_peak = self.system_peak.max(peak(&self.system_input[..count]));
             self.system_ready.extend(self.system_output.iter().copied());
         }
     }
@@ -171,6 +185,15 @@ impl RecordingSession {
         self.sink.write_samples(&self.mix)?;
         Ok(())
     }
+}
+
+fn peak(samples: &[f32]) -> f32 {
+    samples
+        .iter()
+        .copied()
+        .map(f32::abs)
+        .fold(0.0, f32::max)
+        .min(1.0)
 }
 
 fn samples_due(elapsed_seconds: f64, samples_written: u64) -> usize {
@@ -306,5 +329,11 @@ mod tests {
         assert_eq!(samples_due(0.01, 0), 480);
         assert_eq!(samples_due(1.0, 47_520), 480);
         assert_eq!(samples_due(1.0, 48_000), 0);
+    }
+
+    #[test]
+    fn peak_meter_uses_absolute_clamped_signal() {
+        assert_eq!(peak(&[-0.25, 0.6, -1.2]), 1.0);
+        assert_eq!(peak(&[]), 0.0);
     }
 }

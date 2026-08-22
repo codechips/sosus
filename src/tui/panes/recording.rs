@@ -15,6 +15,7 @@ pub fn render(
     focused: bool,
     elapsed_seconds: Option<f64>,
     last_recording: Option<&str>,
+    input_levels: Option<(f32, f32)>,
 ) {
     let title = if focused {
         "▶ Recording"
@@ -33,6 +34,8 @@ pub fn render(
                 format!("Elapsed {minutes:02}:{seconds:02}"),
                 theme::primary_text(),
             ),
+            meter_line("System", input_levels.map_or(0.0, |levels| levels.0)),
+            meter_line("Mic", input_levels.map_or(0.0, |levels| levels.1)),
             Line::styled("r or Ctrl+C to stop", theme::secondary_text()),
         ])
     } else {
@@ -61,4 +64,13 @@ pub fn render(
         Paragraph::new(body).block(block).wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn meter_line(label: &str, level: f32) -> Line<'static> {
+    let filled = (level.clamp(0.0, 1.0) * 10.0).round() as usize;
+    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
+    Line::from(vec![
+        Span::styled(format!("{label:<6}"), theme::secondary_text()),
+        Span::styled(bar, theme::accent_text()),
+    ])
 }
