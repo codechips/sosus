@@ -304,11 +304,7 @@ async fn run_transcribe(
             other => bail!("unexpected database result while creating meeting: {other:?}"),
         }
     };
-    let mut skipped = vec![
-        pipeline::Stage::Summarize,
-        pipeline::Stage::Export,
-        pipeline::Stage::Index,
-    ];
+    let mut skipped = vec![pipeline::Stage::Index];
     if !effective.effective.diarization.enabled {
         skipped.push(pipeline::Stage::Diarize);
     }
@@ -436,6 +432,46 @@ async fn run_transcribe(
         }
     }
 
+    let (summary_title, summary_body) = build_summary(&result);
+    pipeline_state.begin(
+        pipeline::Stage::Summarize,
+        &format!("{input_fingerprint}:deterministic-v1"),
+        "deterministic-summary-v1",
+        &started_text,
+    )?;
+    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
+    let artifact_dir = file.parent().unwrap_or_else(|| Path::new("."));
+    let summary_path = artifact_dir.join("summary.md");
+    if let Err(error) = export::write_summary(&summary_path, &summary_title, &summary_body) {
+        pipeline_state.fail(pipeline::Stage::Summarize, "artifact")?;
+        persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
+        eprintln!("warning: summary artifact was not saved: {error}");
+    } else {
+        let summary_save = database.writer().execute(db::WriteCommand::InsertSummary {
+            meeting_id,
+            template: "deterministic".to_owned(),
+            body: summary_body.clone(),
+            model: "deterministic-v1".to_owned(),
+            created_at: started_text.clone(),
+        });
+        if let Err(error) = summary_save {
+            pipeline_state.fail(pipeline::Stage::Summarize, "database")?;
+            persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
+            eprintln!("warning: summary was not saved to the database: {error}");
+        } else {
+            pipeline_state.complete(pipeline::Stage::Summarize, &started_text)?;
+            persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
+            eprintln!("Saved summary: {}", summary_path.display());
+        }
+    }
+
+    pipeline_state.begin(
+        pipeline::Stage::Export,
+        &format!("{input_fingerprint}:markdown-v1"),
+        "markdown-export-v1",
+        &started_text,
+    )?;
+    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
     for segment in &result.segments {
         if let Some(speaker) = &segment.speaker {
             println!("{speaker}: {}", segment.text);
@@ -444,8 +480,8 @@ async fn run_transcribe(
         }
     }
 
-    if let Some(parent) = file.parent() {
-        let transcript_path = parent.join("transcript.md");
+    {
+        let transcript_path = artifact_dir.join("transcript.md");
         match export::write_transcript(&transcript_path, &result) {
             Ok(()) => eprintln!("Saved transcript: {}", transcript_path.display()),
             Err(error) => eprintln!(
@@ -454,7 +490,7 @@ async fn run_transcribe(
             ),
         }
         if effective.effective.output.json {
-            let json_path = parent.join("transcript.json");
+            let json_path = artifact_dir.join("transcript.json");
             match export::write_transcript_json(&json_path, &result) {
                 Ok(()) => eprintln!("Saved transcript JSON: {}", json_path.display()),
                 Err(error) => eprintln!(
@@ -464,6 +500,8 @@ async fn run_transcribe(
             }
         }
     }
+    pipeline_state.complete(pipeline::Stage::Export, &started_text)?;
+    persist_pipeline_state(&database, meeting_id, &pipeline_state)?;
 
     let transcript_save = database
         .writer()
@@ -481,6 +519,37 @@ async fn run_transcribe(
         eprintln!("warning: database shutdown failed: {error}");
     }
     Ok(())
+}
+
+fn build_summary(result: &asr::TranscriptResult) -> (String, String) {
+    let first_words = result
+        .segments
+        .iter()
+        .flat_map(|segment| segment.text.split_whitespace())
+        .take(8)
+        .collect::<Vec<_>>();
+    let title = if first_words.is_empty() {
+        "Meeting summary".to_owned()
+    } else {
+        format!(
+            "{}{}",
+            first_words.join(" "),
+            if first_words.len() == 8 { "…" } else { "" }
+        )
+    };
+    let body = if result.segments.is_empty() {
+        "No speech was detected.".to_owned()
+    } else {
+        let mut body = format!(
+            "## Transcript overview\n\n- {} segment(s)\n",
+            result.segments.len()
+        );
+        for segment in result.segments.iter().take(5) {
+            body.push_str(&format!("- {}\n", segment.text));
+        }
+        body
+    };
+    (title, body)
 }
 
 fn persist_pipeline_state(
@@ -806,5 +875,32 @@ mod tests {
     #[test]
     fn clap_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn deterministic_summary_is_concise_and_handles_silence() {
+        let empty = asr::TranscriptResult {
+            language: "en".to_owned(),
+            duration_seconds: 1.0,
+            segments: Vec::new(),
+        };
+        let (title, body) = build_summary(&empty);
+        assert_eq!(title, "Meeting summary");
+        assert_eq!(body, "No speech was detected.");
+
+        let transcript = asr::TranscriptResult {
+            language: "en".to_owned(),
+            duration_seconds: 1.0,
+            segments: vec![asr::Segment {
+                start_seconds: 0.0,
+                end_seconds: 1.0,
+                text: "one two three four five six seven eight nine".to_owned(),
+                words: Vec::new(),
+                speaker: None,
+            }],
+        };
+        let (title, body) = build_summary(&transcript);
+        assert_eq!(title, "one two three four five six seven eight…");
+        assert!(body.contains("1 segment(s)"));
     }
 }

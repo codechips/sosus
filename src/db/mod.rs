@@ -58,6 +58,13 @@ pub enum WriteCommand {
         transcript: TranscriptResult,
         speaker_count: usize,
     },
+    InsertSummary {
+        meeting_id: i64,
+        template: String,
+        body: String,
+        model: String,
+        created_at: String,
+    },
     UpsertPipelineStage(PipelineStageUpdate),
     RecoverInterruptedStages {
         meeting_id: Option<i64>,
@@ -281,6 +288,23 @@ fn execute_write(
             speaker_count,
         } => {
             queries::insert_transcript(connection, meeting_id, &transcript, speaker_count)?;
+            Ok(WriteResult::Saved)
+        }
+        WriteCommand::InsertSummary {
+            meeting_id,
+            template,
+            body,
+            model,
+            created_at,
+        } => {
+            queries::insert_summary(
+                connection,
+                meeting_id,
+                &template,
+                &body,
+                &model,
+                &created_at,
+            )?;
             Ok(WriteResult::Saved)
         }
         WriteCommand::UpsertPipelineStage(update) => {

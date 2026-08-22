@@ -269,6 +269,22 @@ pub(super) fn insert_transcript(
     transaction.commit()
 }
 
+pub(super) fn insert_summary(
+    connection: &Connection,
+    meeting_id: i64,
+    template: &str,
+    body: &str,
+    model: &str,
+    created_at: &str,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "INSERT INTO summaries (meeting_id, template, body, model, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![meeting_id, template, body, model, created_at],
+    )?;
+    Ok(())
+}
+
 pub(super) fn upsert_pipeline_stage(
     connection: &Connection,
     update: &PipelineStageUpdate,
