@@ -5,7 +5,10 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use reqwest::{StatusCode, Url, header::LOCATION};
+use reqwest::{
+    StatusCode, Url,
+    header::{LOCATION, RANGE},
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -392,7 +395,10 @@ async fn download_file(
     progress: &dyn ModelProgressSink,
 ) -> Result<(), ModelError> {
     let partial = destination.with_file_name(format!("{}.partial", file.filename));
-    remove_partial(&partial).await?;
+    let existing_bytes = partial_length(&partial).await?;
+    if existing_bytes > file.bytes {
+        remove_partial(&partial).await?;
+    }
     let result = download_to_partial(
         client,
         model,
@@ -403,8 +409,27 @@ async fn download_file(
         progress,
     )
     .await;
-    if let Err(error) = result {
+    if matches!(result, Err(ModelError::RangeNotSupported { .. })) {
         let _ = fs::remove_file(&partial).await;
+        download_to_partial(
+            client,
+            model,
+            file,
+            &partial,
+            completed_bytes,
+            model_total,
+            progress,
+        )
+        .await?;
+    } else if let Err(error) = result {
+        // Keep a valid prefix after a network interruption. The next attempt
+        // verifies it and continues from this byte offset.
+        if matches!(
+            error,
+            ModelError::SizeMismatch { .. } | ModelError::DigestMismatch { .. }
+        ) {
+            let _ = fs::remove_file(&partial).await;
+        }
         return Err(error);
     }
 
@@ -426,10 +451,15 @@ async fn download_to_partial(
     model_total: u64,
     progress: &dyn ModelProgressSink,
 ) -> Result<(), ModelError> {
+    let existing_bytes = partial_length(partial).await?;
     let mut url = validate_https_url(&file.url, &model.redirect_hosts)?;
     let mut response = None;
     for redirect_count in 0..=MAX_REDIRECTS {
-        let candidate = client.get(url.clone()).send().await?;
+        let mut request = client.get(url.clone());
+        if existing_bytes > 0 {
+            request = request.header(RANGE, format!("bytes={existing_bytes}-"));
+        }
+        let candidate = request.send().await?;
         if candidate.status().is_redirection() {
             if redirect_count == MAX_REDIRECTS {
                 return Err(ModelError::TooManyRedirects {
@@ -454,7 +484,17 @@ async fn download_to_partial(
             validate_download_url(&url, &model.redirect_hosts)?;
             continue;
         }
-        if candidate.status() != StatusCode::OK {
+        let expected_status = if existing_bytes > 0 {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        };
+        if existing_bytes > 0 && candidate.status() == StatusCode::OK {
+            return Err(ModelError::RangeNotSupported {
+                file: file.filename.clone(),
+            });
+        }
+        if candidate.status() != expected_status {
             return Err(ModelError::HttpStatus {
                 url: url.to_string(),
                 status: candidate.status(),
@@ -467,17 +507,22 @@ async fn download_to_partial(
         file: file.filename.clone(),
     })?;
     if let Some(length) = response.content_length()
-        && length != file.bytes
+        && length != file.bytes.saturating_sub(existing_bytes)
     {
         return Err(ModelError::SizeMismatch {
             file: file.filename.clone(),
             expected: file.bytes,
-            actual: length,
+            actual: length.saturating_add(existing_bytes),
         });
     }
 
     let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
+    options.write(true);
+    if existing_bytes == 0 {
+        options.create_new(true);
+    } else {
+        options.append(true);
+    }
     #[cfg(unix)]
     options.mode(0o600);
     let mut output = options
@@ -487,8 +532,8 @@ async fn download_to_partial(
             path: partial.to_path_buf(),
             source,
         })?;
-    let mut digest = Sha256::new();
-    let mut downloaded = 0_u64;
+    let mut digest = hash_partial(partial).await?;
+    let mut downloaded = existing_bytes;
     while let Some(chunk) = response.chunk().await? {
         downloaded = downloaded.saturating_add(chunk.len() as u64);
         if downloaded > file.bytes {
@@ -524,6 +569,49 @@ async fn download_to_partial(
         })?;
     drop(output);
     verify_size_and_digest(file, downloaded, digest.finalize().as_slice())
+}
+
+async fn partial_length(path: &Path) -> Result<u64, ModelError> {
+    match fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() => Ok(metadata.len()),
+        Ok(_) => Err(ModelError::InspectFile {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("partial download is not a regular file"),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(source) => Err(ModelError::InspectFile {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+async fn hash_partial(path: &Path) -> Result<Sha256, ModelError> {
+    let mut digest = Sha256::new();
+    let mut input = match File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(digest),
+        Err(source) => {
+            return Err(ModelError::InspectFile {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let mut buffer = vec![0_u8; DOWNLOAD_BUFFER_BYTES];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .await
+            .map_err(|source| ModelError::InspectFile {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if read == 0 {
+            return Ok(digest);
+        }
+        digest.update(&buffer[..read]);
+    }
 }
 
 async fn verify_file(path: &Path, expected: &ModelFile) -> Result<bool, ModelError> {
@@ -651,6 +739,8 @@ pub enum ModelError {
     TooManyRedirects { file: String },
     #[error("model download from `{url}` returned HTTP {status}")]
     HttpStatus { url: String, status: StatusCode },
+    #[error("model download server does not support resuming `{file}`")]
+    RangeNotSupported { file: String },
     #[error("model network request failed")]
     Request(#[from] reqwest::Error),
     #[error("could not create model directory {path}", path = .path.display())]
@@ -760,6 +850,24 @@ mod tests {
             embedding.files[0].sha256,
             "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b"
         );
+    }
+
+    #[tokio::test]
+    async fn partial_downloads_are_measured_and_rehashed_before_resuming() {
+        let root = std::env::temp_dir().join(format!(
+            "sosus-model-partial-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        fs::create_dir(&root).await.unwrap();
+        let partial = root.join("weights.bin.partial");
+        fs::write(&partial, b"prefix").await.unwrap();
+        assert_eq!(partial_length(&partial).await.unwrap(), 6);
+        assert_eq!(
+            format!("{:x}", hash_partial(&partial).await.unwrap().finalize()),
+            "e7a2e8b216e5aec3facf743962d3997f2e7d70088ef257de472d6a258049832e"
+        );
+        fs::remove_dir_all(root).await.unwrap();
     }
 
     #[test]
