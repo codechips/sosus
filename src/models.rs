@@ -29,7 +29,9 @@ pub struct ModelManifest {
 #[serde(deny_unknown_fields)]
 pub struct ModelEntry {
     pub alias: String,
-    pub asr_backend: String,
+    pub kind: String,
+    #[serde(default)]
+    pub asr_backend: Option<String>,
     pub repository: String,
     pub revision: String,
     pub origin_url: String,
@@ -96,9 +98,18 @@ impl ModelManifest {
     pub fn asr_model(&self, backend: &str) -> Result<&ModelEntry, ModelError> {
         self.models
             .iter()
-            .find(|model| model.asr_backend == backend)
+            .find(|model| model.asr_backend.as_deref() == Some(backend))
             .ok_or_else(|| ModelError::MissingBackendModel {
                 backend: backend.to_owned(),
+            })
+    }
+
+    pub fn diarization_model(&self, kind: &str) -> Result<&ModelEntry, ModelError> {
+        self.models
+            .iter()
+            .find(|model| model.kind == kind)
+            .ok_or_else(|| ModelError::MissingDiarizationModel {
+                kind: kind.to_owned(),
             })
     }
 
@@ -141,15 +152,30 @@ impl ModelEntry {
                 self.alias
             )));
         }
-        if self.asr_backend.is_empty()
-            || !self
-                .asr_backend
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+        if !matches!(
+            self.kind.as_str(),
+            "asr" | "diarization-segmentation" | "diarization-embedding"
+        ) {
+            return Err(ModelError::InvalidManifest(format!(
+                "model `{}` has invalid kind `{}`",
+                self.alias, self.kind
+            )));
+        }
+        if self.kind == "asr" && self.asr_backend.is_none() {
+            return Err(ModelError::InvalidManifest(format!(
+                "ASR model `{}` is missing its backend",
+                self.alias
+            )));
+        }
+        if let Some(backend) = &self.asr_backend
+            && (backend.is_empty()
+                || !backend
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'-'))
         {
             return Err(ModelError::InvalidManifest(format!(
-                "model `{}` has invalid ASR backend `{}`",
-                self.alias, self.asr_backend
+                "model `{}` has invalid ASR backend `{backend}`",
+                self.alias
             )));
         }
         if self.repository.split('/').count() != 2 {
@@ -158,9 +184,9 @@ impl ModelEntry {
                 self.alias, self.repository
             )));
         }
-        if !is_lower_hex(&self.revision, 40) {
+        if self.revision.trim().is_empty() {
             return Err(ModelError::InvalidManifest(format!(
-                "model `{}` revision is not an immutable 40-character commit",
+                "model `{}` is missing its immutable revision",
                 self.alias
             )));
         }
@@ -227,7 +253,10 @@ impl ModelEntry {
                 )));
             }
             let url = validate_https_url(&file.url, &self.redirect_hosts)?;
-            if !url.path().contains(&self.revision) {
+            let is_hugging_face = self.origin_url.contains("huggingface.co/");
+            if is_hugging_face
+                && (!is_lower_hex(&self.revision, 40) || !url.path().contains(&self.revision))
+            {
                 return Err(ModelError::InvalidManifest(format!(
                     "model `{}` file `{}` URL does not contain its immutable revision",
                     self.alias, file.filename
@@ -302,6 +331,16 @@ pub async fn ensure_asr_model(
 ) -> Result<PathBuf, ModelError> {
     let manifest = manifest()?;
     let alias = manifest.asr_model(backend)?.alias.clone();
+    ensure_model(&alias, model_root, progress).await
+}
+
+pub async fn ensure_diarization_model(
+    kind: &str,
+    model_root: &Path,
+    progress: &dyn ModelProgressSink,
+) -> Result<PathBuf, ModelError> {
+    let manifest = manifest()?;
+    let alias = manifest.diarization_model(kind)?.alias.clone();
     ensure_model(&alias, model_root, progress).await
 }
 
@@ -560,6 +599,8 @@ pub enum ModelError {
     UnknownAlias { alias: String, known: String },
     #[error("no built-in model is available yet for the `{backend}` ASR backend")]
     MissingBackendModel { backend: String },
+    #[error("no built-in diarization model is available for `{kind}`")]
+    MissingDiarizationModel { kind: String },
     #[error(
         "model download URL `{url}` is not HTTPS or its host is not allowed; allowed hosts: {allowed}"
     )]
@@ -643,6 +684,28 @@ mod tests {
         assert_eq!(model.files.len(), 4);
         assert_eq!(model.total_bytes(), 670_478_772);
         assert!(model.files.iter().any(|file| file.filename == "tokens.txt"));
+    }
+
+    #[test]
+    fn embedded_manifest_pins_both_diarization_models() {
+        let manifest = manifest().unwrap();
+        let segmentation = manifest
+            .diarization_model("diarization-segmentation")
+            .unwrap();
+        assert_eq!(segmentation.revision.len(), 40);
+        assert_eq!(segmentation.files[0].bytes, 1_540_506);
+        assert_eq!(
+            segmentation.files[0].sha256,
+            "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d"
+        );
+
+        let embedding = manifest.diarization_model("diarization-embedding").unwrap();
+        assert_eq!(embedding.revision, "release-asset-198893098");
+        assert_eq!(embedding.files[0].bytes, 39_593_761);
+        assert_eq!(
+            embedding.files[0].sha256,
+            "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b"
+        );
     }
 
     #[test]

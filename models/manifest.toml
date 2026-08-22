@@ -2,6 +2,7 @@ version = 1
 
 [[models]]
 alias = "parakeet-tdt-0.6b-v3-int8"
+kind = "asr"
 asr_backend = "parakeet"
 repository = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 revision = "2bda32ec70b097a55adaa07d9a7173915b43cc78"
@@ -33,3 +34,35 @@ filename = "tokens.txt"
 url = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/tokens.txt"
 sha256 = "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
 bytes = 93939
+
+[[models]]
+alias = "pyannote-segmentation-3-0-int8"
+kind = "diarization-segmentation"
+repository = "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0"
+revision = "9403a6902bb58e3d5ae8c7e77c3422de279db2e0"
+origin_url = "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0"
+license = "MIT"
+attribution = "Pyannote segmentation 3.0 exported for sherpa-onnx by the k2-fsa project"
+redirect_hosts = ["huggingface.co", "hf.co", "cdn-lfs.huggingface.co", "us.aws.cdn.hf.co"]
+
+[[models.files]]
+filename = "model.int8.onnx"
+url = "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.int8.onnx"
+sha256 = "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d"
+bytes = 1540506
+
+[[models]]
+alias = "3dspeaker-eres2net-base-sv-zh-cn"
+kind = "diarization-embedding"
+repository = "k2-fsa/sherpa-onnx"
+revision = "release-asset-198893098"
+origin_url = "https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models"
+license = "Apache-2.0"
+attribution = "3D-Speaker ERes2Net speaker embedding model, distributed by the k2-fsa sherpa-onnx project"
+redirect_hosts = ["github.com", "release-assets.githubusercontent.com"]
+
+[[models.files]]
+filename = "3dspeaker.onnx"
+url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+sha256 = "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b"
+bytes = 39593761

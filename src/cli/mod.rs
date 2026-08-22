@@ -11,7 +11,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::time::{Duration, MissedTickBehavior};
 
-use crate::{asr, audio, config, db, logging, models, paths};
+use crate::{asr, audio, config, db, diarize, logging, models, paths};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -55,6 +55,15 @@ enum Command {
         /// Override the physical-core thread default.
         #[arg(long)]
         threads: Option<usize>,
+        /// Skip speaker diarization for this invocation.
+        #[arg(long)]
+        no_diarize: bool,
+        /// Require at least this many speakers (zero = auto).
+        #[arg(long, value_name = "N")]
+        min_speakers: Option<usize>,
+        /// Allow at most this many speakers (zero = auto).
+        #[arg(long, value_name = "N")]
+        max_speakers: Option<usize>,
     },
 }
 
@@ -69,19 +78,52 @@ pub async fn run() -> anyhow::Result<()> {
             backend,
             ref language,
             threads,
-        }) => run_transcribe(&cli, file, backend, language.clone(), threads).await,
+            no_diarize,
+            min_speakers,
+            max_speakers,
+        }) => {
+            run_transcribe(
+                &cli,
+                TranscribeInvocation {
+                    file,
+                    backend,
+                    language: language.clone(),
+                    threads,
+                    no_diarize,
+                    min_speakers,
+                    max_speakers,
+                },
+            )
+            .await
+        }
         None if io::stdin().is_terminal() && io::stdout().is_terminal() => run_tui(&cli).await,
         None => print_help(),
     }
 }
 
-async fn run_transcribe(
-    cli: &Cli,
-    file: &Path,
+struct TranscribeInvocation<'a> {
+    file: &'a Path,
     backend: Option<asr::TranscriptionBackend>,
     language: Option<String>,
     threads: Option<usize>,
+    no_diarize: bool,
+    min_speakers: Option<usize>,
+    max_speakers: Option<usize>,
+}
+
+async fn run_transcribe(
+    cli: &Cli,
+    invocation_args: TranscribeInvocation<'_>,
 ) -> anyhow::Result<()> {
+    let TranscribeInvocation {
+        file,
+        backend,
+        language,
+        threads,
+        no_diarize,
+        min_speakers,
+        max_speakers,
+    } = invocation_args;
     let invocation = config::ConfigOverrides {
         config_path: cli.config.clone(),
         data_dir: cli.data_dir.clone(),
@@ -89,6 +131,9 @@ async fn run_transcribe(
         backend,
         language,
         threads,
+        diarization_enabled: no_diarize.then_some(false),
+        min_speakers,
+        max_speakers,
         ..config::ConfigOverrides::default()
     };
     let defaults = paths::AppPaths::resolve(None, None, cli.output_dir.as_deref())?;
@@ -147,8 +192,75 @@ async fn run_transcribe(
         )
         .context("transcription failed")?;
 
+    let mut result = result;
+    if effective.effective.diarization.enabled {
+        eprintln!("Preparing speaker diarization models...");
+        let model_dirs = match models::ensure_diarization_model(
+            "diarization-segmentation",
+            app_paths.model_dir(),
+            &model_progress,
+        )
+        .await
+        {
+            Ok(segmentation_dir) => match models::ensure_diarization_model(
+                "diarization-embedding",
+                app_paths.model_dir(),
+                &model_progress,
+            )
+            .await
+            {
+                Ok(embedding_dir) => Some((segmentation_dir, embedding_dir)),
+                Err(error) => {
+                    eprintln!(
+                        "warning: diarization model preparation failed; transcript is undiarized: {error}"
+                    );
+                    None
+                }
+            },
+            Err(error) => {
+                eprintln!(
+                    "warning: diarization model preparation failed; transcript is undiarized: {error}"
+                );
+                None
+            }
+        };
+        if let Some((segmentation_dir, embedding_dir)) = model_dirs {
+            eprintln!();
+            eprintln!("Diarizing {:.1}s of audio...", audio.duration_seconds());
+            let diarization = diarize::Diarizer::prepare(&diarize::DiarizationOptions {
+                segmentation_dir,
+                embedding_dir,
+                threads: thread_count,
+                min_speakers: effective.effective.diarization.min_speakers,
+                max_speakers: effective.effective.diarization.max_speakers,
+            });
+            match diarization {
+                Ok(mut diarizer) => match diarizer.process(&audio, &ConsoleDiarizationProgress) {
+                    Ok(diarization) => {
+                        let assignment =
+                            diarize::assign_speakers(&mut result, &diarization.turns, false);
+                        eprintln!(
+                            "Diarization complete: {} speaker(s).",
+                            assignment.speaker_count
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("warning: diarization failed; transcript is undiarized: {error}")
+                    }
+                },
+                Err(error) => {
+                    eprintln!("warning: diarization failed; transcript is undiarized: {error}")
+                }
+            }
+        }
+    }
+
     for segment in result.segments {
-        println!("{}", segment.text);
+        if let Some(speaker) = segment.speaker {
+            println!("{speaker}: {}", segment.text);
+        } else {
+            println!("{}", segment.text);
+        }
     }
     Ok(())
 }
@@ -188,6 +300,23 @@ impl asr::ProgressSink for ConsoleAsrProgress {
     fn report(&self, fraction: f32) {
         if fraction >= 1.0 {
             eprintln!("Transcription complete.");
+        }
+    }
+}
+
+struct ConsoleDiarizationProgress;
+
+impl diarize::ProgressSink for ConsoleDiarizationProgress {
+    fn report(&self, stage: diarize::DiarizationStage, complete: bool) {
+        let name = match stage {
+            diarize::DiarizationStage::Segmentation => "segmentation",
+            diarize::DiarizationStage::Embedding => "embedding",
+            diarize::DiarizationStage::Clustering => "clustering",
+        };
+        if complete {
+            eprintln!("Diarization {name} complete.");
+        } else {
+            eprintln!("Diarization {name}...");
         }
     }
 }

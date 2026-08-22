@@ -220,6 +220,7 @@ pub struct Word {
     pub end_seconds: f64,
     pub text: String,
     pub score: f32,
+    pub speaker: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -228,6 +229,7 @@ pub struct Segment {
     pub end_seconds: f64,
     pub text: String,
     pub words: Vec<Word>,
+    pub speaker: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

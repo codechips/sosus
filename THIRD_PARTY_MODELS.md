@@ -16,3 +16,14 @@ The exact file sizes, download URLs, redirect allowlist, and SHA-256 digests are
 recorded in `models/manifest.toml`. The upstream export does not currently
 publish the `bpe.vocab` companion required for contextual hotword biasing, so
 sosus does not claim that feature for this model yet.
+
+## Speaker diarization models (sherpa-onnx)
+
+Sosus uses the official sherpa-onnx pairing of Pyannote segmentation 3.0 and
+3D-Speaker ERes2Net embeddings. The segmentation export is MIT licensed; the
+3D-Speaker model is distributed under Apache-2.0. The exact source revisions,
+release asset identifier, sizes, URLs, and SHA-256 digests are pinned in
+`models/manifest.toml`.
+
+- Pyannote segmentation 3.0 int8: `pyannote-segmentation-3-0-int8`
+- 3D-Speaker ERes2Net base SV: `3dspeaker-eres2net-base-sv-zh-cn`

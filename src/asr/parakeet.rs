@@ -125,6 +125,7 @@ impl Transcriber for ParakeetTranscriber {
                 end_seconds,
                 text: result.text,
                 words,
+                speaker: None,
             }]
         };
         progress.report(1.0);
@@ -248,6 +249,7 @@ fn native_words(
                 end_seconds: end,
                 text,
                 score: 0.0,
+                speaker: None,
             });
         } else if let Some(word) = &mut current {
             word.text.push_str(&text);
@@ -258,6 +260,7 @@ fn native_words(
                 end_seconds: end,
                 text,
                 score: 0.0,
+                speaker: None,
             });
         }
     }
