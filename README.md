@@ -42,7 +42,7 @@ Import an existing file into the meeting archive, or resume a meeting whose proc
 
 ```sh
 sosus import ~/Downloads/meeting.m4a
-sosus resume ~/Library/Application\ Support/sosus/recordings/2026-08-22_1430
+sosus resume ~/sosus/recordings/2026-08-22_1430
 ```
 
 ## Development
