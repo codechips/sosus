@@ -152,7 +152,6 @@ async fn run_resume(cli: &Cli, meeting_id: i64) -> anyhow::Result<()> {
         Some(&effective.effective.output.dir),
     )?;
     app_paths.ensure_base_directories()?;
-    logging::initialize(app_paths.log_dir())?;
     let database = db::Database::open(app_paths.database_file())?;
     let recovered = database
         .writer()
