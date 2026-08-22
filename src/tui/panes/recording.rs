@@ -50,10 +50,9 @@ pub fn render(
                 meter_width,
             ),
         ];
-        lines.extend(spectrum_lines(
+        lines.push(spectrum_line(
             spectrum,
             area.width.saturating_sub(4) as usize,
-            6,
         ));
         lines.extend([
             Line::styled(
@@ -91,48 +90,29 @@ pub fn render(
     );
 }
 
-fn spectrum_lines(levels: &[f32], width: usize, height: usize) -> Vec<Line<'static>> {
+fn spectrum_line(levels: &[f32], width: usize) -> Line<'static> {
     let width = width.max(1);
-    let height = height.max(1);
     let columns = (0..width)
         .map(|column| {
             let index = column.saturating_mul(levels.len()) / width;
             levels.get(index).copied().unwrap_or(0.0).clamp(0.0, 1.0)
         })
         .collect::<Vec<_>>();
-    (0..height)
-        .map(|row| {
-            let mut line = Vec::with_capacity(columns.len());
-            for level in &columns {
-                let height_f = *level * height as f32;
-                let row_from_bottom = height - row;
-                let filled = height_f >= row_from_bottom as f32;
-                let cap = height_f > 0.0
-                    && height_f < row_from_bottom as f32
-                    && height_f >= (row_from_bottom - 1) as f32;
-                if filled {
-                    line.push(Span::styled("█", spectrum_style(row, height)));
-                } else if cap {
-                    line.push(Span::styled(
-                        "▔",
-                        Style::default().fg(Color::Rgb(255, 214, 112)),
-                    ));
-                } else {
-                    // RAV-style dotted field keeps the spectrum legible at rest without
-                    // turning silence into a blank or visually broken component.
-                    line.push(Span::styled(
-                        "·",
-                        Style::default().fg(Color::Rgb(48, 58, 70)),
-                    ));
-                }
-            }
-            Line::from(line)
-        })
-        .collect()
+    const GLYPHS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    Line::from(
+        columns
+            .iter()
+            .map(|level| {
+                let index =
+                    ((*level * (GLYPHS.len() - 1) as f32).round() as usize).min(GLYPHS.len() - 1);
+                Span::styled(GLYPHS[index], spectrum_style(*level))
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
-fn spectrum_style(row: usize, height: usize) -> Style {
-    let position = 1.0 - row as f32 / height.max(1) as f32;
+fn spectrum_style(level: f32) -> Style {
+    let position = level.clamp(0.0, 1.0);
     let red = (40.0 + position * 180.0) as u8;
     let green = (150.0 + position * 70.0) as u8;
     let blue = (235.0 - position * 120.0) as u8;
