@@ -853,6 +853,7 @@ async fn run_tui(cli: &Cli) -> anyhow::Result<()> {
             database_writer: database.writer(),
             language: effective.effective.transcription.language,
         }),
+        database_reader: Some(reader),
     };
     let result = crate::tui::run(startup).await;
     let shutdown = database.shutdown().context("shut down database writer");
