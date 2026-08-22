@@ -280,7 +280,7 @@ impl App {
             PipelineEvent::WorkStarted => {
                 self.pipeline_active = true;
                 self.processing_spinner_frame = 0;
-                self.pipeline_status = Some("Preparing recording".to_owned());
+                self.pipeline_status = Some("Starting".to_owned());
             }
             PipelineEvent::Stage(stage) => self.pipeline_status = Some(stage),
             PipelineEvent::WorkProgress { .. } => {}
@@ -533,12 +533,20 @@ fn launch_pipeline(
         if let Some(stderr) = child.stderr.take() {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let stage = if line.starts_with("Transcribing ") {
+                let stage = if line.starts_with("Preparing transcription") {
+                    Some("Preparing transcription")
+                } else if line.starts_with("Reading recording") {
+                    Some("Reading recording")
+                } else if line.starts_with("Loading transcriber") {
+                    Some("Loading transcriber")
+                } else if line.starts_with("Transcribing ") {
                     Some("Transcribing")
+                } else if line.starts_with("Preparing diarization") {
+                    Some("Preparing diarization")
                 } else if line.starts_with("Diarizing ") {
                     Some("Diarizing")
-                } else if line.starts_with("Saved transcript:") {
-                    Some("Exporting")
+                } else if line.starts_with("Saving transcript") {
+                    Some("Saving transcript")
                 } else {
                     None
                 };
@@ -882,7 +890,7 @@ mod tests {
         let mut app = app();
         app.handle_pipeline_event(PipelineEvent::WorkStarted);
         assert!(app.pipeline_active);
-        assert_eq!(app.pipeline_status.as_deref(), Some("Preparing recording"));
+        assert_eq!(app.pipeline_status.as_deref(), Some("Starting"));
 
         app.handle_pipeline_event(PipelineEvent::Stage("Transcribing".to_owned()));
         app.handle_pipeline_event(PipelineEvent::WorkProgress {

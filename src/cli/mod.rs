@@ -234,12 +234,14 @@ async fn run_transcribe(
     let backend = effective.effective.transcription.backend;
     let capabilities = backend.capabilities();
     let model_progress = ConsoleModelProgress::new();
+    eprintln!("Preparing transcription...");
     let model_dir =
         models::ensure_asr_model(capabilities.id, app_paths.model_dir(), &model_progress)
             .await
             .context("could not prepare the transcription model")?;
     model_progress.finish();
 
+    eprintln!("Reading recording...");
     let audio = asr::decode_audio_file(file).context("could not decode the input file")?;
     let thread_count = match effective.effective.transcription.threads {
         0 => num_cpus::get_physical().max(1),
@@ -261,6 +263,7 @@ async fn run_transcribe(
         &started_text,
     )?;
     let mut transcriber = asr::create_transcriber(backend);
+    eprintln!("Loading transcriber...");
     if let Err(error) = transcriber.prepare(&asr::PrepareOptions {
         model_dir,
         threads: thread_count,
@@ -296,6 +299,7 @@ async fn run_transcribe(
             "sherpa-onnx-diarization-1",
             &started_text,
         )?;
+        eprintln!("Preparing diarization...");
         let model_dirs = match models::ensure_diarization_model(
             "diarization-segmentation",
             app_paths.model_dir(),
@@ -367,6 +371,7 @@ async fn run_transcribe(
         "markdown-export-v1",
         &started_text,
     )?;
+    eprintln!("Saving transcript...");
     for segment in &result.segments {
         if let Some(speaker) = &segment.speaker {
             println!("{speaker}: {}", segment.text);
