@@ -41,6 +41,9 @@ jobs:
           cache: false
           github_token: ""
 
+      - name: Install Rust quality components
+        run: rustup component add rustfmt clippy
+
       - name: Confirm Apple Silicon runner
         run: test "$(uname -m)" = arm64
 
