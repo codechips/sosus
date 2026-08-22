@@ -24,6 +24,8 @@ pub const SUPPORTED_EXTENSIONS: &[&str] =
     &["wav", "mp3", "m4a", "flac", "ogg", "mp4", "m4v", "mov"];
 const RESAMPLE_CHUNK_FRAMES: usize = 1_024;
 const RESAMPLE_SUB_CHUNKS: usize = 2;
+const MAX_NORMALIZED_SECONDS: usize = 4 * 60 * 60;
+const MAX_NORMALIZED_SAMPLES: usize = Audio16kMono::SAMPLE_RATE as usize * MAX_NORMALIZED_SECONDS;
 
 pub fn decode_audio_file(path: &Path) -> Result<Audio16kMono, AudioDecodeError> {
     let extension = path
@@ -70,7 +72,8 @@ pub fn decode_audio_file(path: &Path) -> Result<Audio16kMono, AudioDecodeError> 
         })?;
 
     let mut source_rate = None;
-    let mut mono = Vec::new();
+    let mut output = Vec::new();
+    let mut resampler = None;
     loop {
         let packet = match format.next_packet() {
             Ok(packet) => packet,
@@ -105,6 +108,9 @@ pub fn decode_audio_file(path: &Path) -> Result<Audio16kMono, AudioDecodeError> 
             }
         } else {
             source_rate = Some(spec.rate);
+            if spec.rate != Audio16kMono::SAMPLE_RATE {
+                resampler = Some(StreamingResampler::new(spec.rate)?);
+            }
         }
 
         let channels = spec.channels.count();
@@ -115,90 +121,126 @@ pub fn decode_audio_file(path: &Path) -> Result<Audio16kMono, AudioDecodeError> 
         }
         let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
         samples.copy_interleaved_ref(decoded);
-        mono.reserve(samples.samples().len() / channels);
+        let mut mono = Vec::with_capacity(samples.samples().len() / channels);
         for frame in samples.samples().chunks_exact(channels) {
             mono.push(frame.iter().sum::<f32>() / channels as f32);
+        }
+        if let Some(resampler) = &mut resampler {
+            resampler.push(&mono, &mut output)?;
+        } else {
+            append_bounded(&mut output, &mono)?;
         }
     }
 
     let source_rate = source_rate.ok_or_else(|| AudioDecodeError::EmptyAudio {
         path: path.to_path_buf(),
     })?;
-    if mono.is_empty() {
+    if output.is_empty() && resampler.is_none() {
+        return Err(AudioDecodeError::EmptyAudio {
+            path: path.to_path_buf(),
+        });
+    }
+    if let Some(resampler) = &mut resampler {
+        resampler.finish(&mut output)?;
+    }
+    if output.is_empty() {
         return Err(AudioDecodeError::EmptyAudio {
             path: path.to_path_buf(),
         });
     }
 
-    Ok(Audio16kMono::new(resample_to_16k(mono, source_rate)?))
+    let _ = source_rate;
+    Ok(Audio16kMono::new(output))
 }
 
-fn resample_to_16k(samples: Vec<f32>, source_rate: u32) -> Result<Vec<f32>, AudioDecodeError> {
-    if source_rate == Audio16kMono::SAMPLE_RATE {
-        return Ok(samples);
+struct StreamingResampler {
+    inner: FftFixedIn<f32>,
+    pending: Vec<f32>,
+    buffer: Vec<Vec<f32>>,
+    delay: usize,
+    source_rate: usize,
+    input_frames: usize,
+}
+
+impl StreamingResampler {
+    fn new(source_rate: u32) -> Result<Self, AudioDecodeError> {
+        let inner = FftFixedIn::<f32>::new(
+            source_rate as usize,
+            Audio16kMono::SAMPLE_RATE as usize,
+            RESAMPLE_CHUNK_FRAMES,
+            RESAMPLE_SUB_CHUNKS,
+            1,
+        )
+        .map_err(AudioDecodeError::ResamplerConstruction)?;
+        let buffer = vec![vec![0.0; inner.output_frames_max()]];
+        Ok(Self {
+            delay: inner.output_delay(),
+            inner,
+            pending: Vec::new(),
+            buffer,
+            source_rate: source_rate as usize,
+            input_frames: 0,
+        })
     }
 
-    let mut resampler = FftFixedIn::<f32>::new(
-        source_rate as usize,
-        Audio16kMono::SAMPLE_RATE as usize,
-        RESAMPLE_CHUNK_FRAMES,
-        RESAMPLE_SUB_CHUNKS,
-        1,
-    )
-    .map_err(AudioDecodeError::ResamplerConstruction)?;
-    let expected_frames = samples
-        .len()
-        .saturating_mul(Audio16kMono::SAMPLE_RATE as usize)
-        .saturating_add(source_rate as usize / 2)
-        / source_rate as usize;
-    let delay = resampler.output_delay();
-    let mut output = Vec::with_capacity(expected_frames.saturating_add(delay));
-    let mut remaining = samples.as_slice();
-    let mut output_buffer = vec![vec![0.0; resampler.output_frames_max()]];
-
-    while remaining.len() >= resampler.input_frames_next() {
-        let input = [remaining];
-        let (consumed, produced) = resampler
-            .process_into_buffer(&input, &mut output_buffer, None)
-            .map_err(AudioDecodeError::Resample)?;
-        output.extend_from_slice(&output_buffer[0][..produced]);
-        remaining = &remaining[consumed..];
-    }
-
-    let produced = if remaining.is_empty() {
-        let empty: Option<&[&[f32]]> = None;
-        resampler
-            .process_partial_into_buffer(empty, &mut output_buffer, None)
-            .map_err(AudioDecodeError::Resample)?
-            .1
-    } else {
-        let input = [remaining];
-        resampler
-            .process_partial_into_buffer(Some(&input), &mut output_buffer, None)
-            .map_err(AudioDecodeError::Resample)?
-            .1
-    };
-    output.extend_from_slice(&output_buffer[0][..produced]);
-
-    let end = delay.saturating_add(expected_frames);
-    while output.len() < end {
-        let empty: Option<&[&[f32]]> = None;
-        let produced = resampler
-            .process_partial_into_buffer(empty, &mut output_buffer, None)
-            .map_err(AudioDecodeError::Resample)?
-            .1;
-        if produced == 0 {
-            break;
+    fn push(&mut self, samples: &[f32], output: &mut Vec<f32>) -> Result<(), AudioDecodeError> {
+        self.input_frames = self.input_frames.saturating_add(samples.len());
+        self.pending.extend_from_slice(samples);
+        while self.pending.len() >= self.inner.input_frames_next() {
+            let input = [self.pending.as_slice()];
+            let (consumed, produced) = self
+                .inner
+                .process_into_buffer(&input, &mut self.buffer, None)
+                .map_err(AudioDecodeError::Resample)?;
+            append_bounded(output, &self.buffer[0][..produced])?;
+            self.pending.drain(..consumed);
         }
-        output.extend_from_slice(&output_buffer[0][..produced]);
+        Ok(())
     }
-    if output.len() < end {
-        return Err(AudioDecodeError::IncompleteResample {
-            expected: expected_frames,
-            actual: output.len().saturating_sub(delay),
+
+    fn finish(&mut self, output: &mut Vec<f32>) -> Result<(), AudioDecodeError> {
+        let expected = self
+            .input_frames
+            .saturating_mul(Audio16kMono::SAMPLE_RATE as usize)
+            .saturating_add(self.source_rate / 2)
+            / self.source_rate;
+        let end = self.delay.saturating_add(expected);
+        while output.len() < end {
+            let input = (!self.pending.is_empty()).then_some([self.pending.as_slice()]);
+            let produced = self
+                .inner
+                .process_partial_into_buffer(
+                    input.as_ref().map(|input| input.as_slice()),
+                    &mut self.buffer,
+                    None,
+                )
+                .map_err(AudioDecodeError::Resample)?
+                .1;
+            append_bounded(output, &self.buffer[0][..produced])?;
+            self.pending.clear();
+            if produced == 0 && output.len() < end {
+                return Err(AudioDecodeError::IncompleteResample {
+                    expected,
+                    actual: output.len().saturating_sub(self.delay),
+                });
+            }
+        }
+        let discard = self.delay.min(output.len());
+        output.drain(..discard);
+        output.truncate(expected);
+        Ok(())
+    }
+}
+
+fn append_bounded(output: &mut Vec<f32>, samples: &[f32]) -> Result<(), AudioDecodeError> {
+    let attempted = output.len().saturating_add(samples.len());
+    if attempted > MAX_NORMALIZED_SAMPLES {
+        return Err(AudioDecodeError::TooLong {
+            maximum_seconds: MAX_NORMALIZED_SECONDS,
         });
     }
-    Ok(output[delay..end].to_vec())
+    output.extend_from_slice(samples);
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -254,6 +296,8 @@ pub enum AudioDecodeError {
     ResamplerConstruction(#[source] rubato::ResamplerConstructionError),
     #[error("audio resampling failed")]
     Resample(#[source] rubato::ResampleError),
+    #[error("audio exceeds the {maximum_seconds}-second decoding limit")]
+    TooLong { maximum_seconds: usize },
     #[error("audio resampling produced {actual} frames; expected {expected}")]
     IncompleteResample { expected: usize, actual: usize },
 }

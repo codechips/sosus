@@ -1077,7 +1077,7 @@ fn install_panic_hook() {
 
 struct InputThread {
     stop: Arc<AtomicBool>,
-    events: mpsc::UnboundedReceiver<UiEvent>,
+    events: mpsc::Receiver<UiEvent>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -1085,7 +1085,7 @@ impl InputThread {
     fn spawn() -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
-        let (event_tx, events) = mpsc::unbounded_channel();
+        let (event_tx, events) = mpsc::channel(128);
         let join = thread::Builder::new()
             .name("sosus-terminal-input".to_owned())
             .spawn(move || input_loop(&thread_stop, &event_tx))?;
@@ -1123,17 +1123,17 @@ impl Drop for InputThread {
     }
 }
 
-fn input_loop(stop: &AtomicBool, events: &mpsc::UnboundedSender<UiEvent>) {
+fn input_loop(stop: &AtomicBool, events: &mpsc::Sender<UiEvent>) {
     while !stop.load(Ordering::Acquire) {
         match event::poll(Duration::from_millis(25)) {
             Ok(true) => match event::read() {
                 Ok(event) => {
-                    if events.send(UiEvent::Terminal(event)).is_err() {
+                    if !send_input_event(events, UiEvent::Terminal(event)) {
                         break;
                     }
                 }
                 Err(error) => {
-                    if events.send(UiEvent::InputError(error.to_string())).is_err() {
+                    if !send_input_event(events, UiEvent::InputError(error.to_string())) {
                         break;
                     }
                     thread::sleep(Duration::from_millis(100));
@@ -1141,12 +1141,31 @@ fn input_loop(stop: &AtomicBool, events: &mpsc::UnboundedSender<UiEvent>) {
             },
             Ok(false) => {}
             Err(error) => {
-                if events.send(UiEvent::InputError(error.to_string())).is_err() {
+                if !send_input_event(events, UiEvent::InputError(error.to_string())) {
                     break;
                 }
                 thread::sleep(Duration::from_millis(100));
             }
         }
+    }
+}
+
+fn send_input_event(events: &mpsc::Sender<UiEvent>, event: UiEvent) -> bool {
+    match events.try_send(event) {
+        Ok(()) => true,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
+            if matches!(
+                event,
+                UiEvent::Terminal(
+                    Event::Mouse(_) | Event::Resize(_, _) | Event::FocusGained | Event::FocusLost
+                )
+            ) {
+                true
+            } else {
+                events.blocking_send(event).is_ok()
+            }
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
     }
 }
 
