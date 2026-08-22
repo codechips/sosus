@@ -1,5 +1,7 @@
 //! Markdown transcript and summary rendering.
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fmt::Write as _,
     fs::{self, OpenOptions},
@@ -49,6 +51,33 @@ pub fn write_transcript(path: &Path, transcript: &TranscriptResult) -> io::Resul
             }
         }
         Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+    result
+}
+
+#[allow(dead_code)]
+pub fn write_summary(path: &Path, title: &str, body: &str) -> io::Result<()> {
+    let markdown = format!("# {title}\n\n{body}\n");
+    let partial = path.with_file_name(format!(
+        ".{}.partial",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("summary.md")
+    ));
+    let _ = fs::remove_file(&partial);
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let result = (|| {
+        let mut file = options.open(&partial)?;
+        file.write_all(markdown.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&partial, path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&partial);

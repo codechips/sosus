@@ -303,7 +303,7 @@ impl Default for SearchConfig {
 #[serde(default)]
 pub struct OutputConfig {
     pub dir: PathBuf,
-    pub format: OutputFormat,
+    pub json: bool,
     pub keep_recording: bool,
     pub retention_days: u64,
 }
@@ -312,19 +312,11 @@ impl Default for OutputConfig {
     fn default() -> Self {
         Self {
             dir: PathBuf::from("~/sosus/recordings"),
-            format: OutputFormat::Markdown,
+            json: false,
             keep_recording: true,
             retention_days: 0,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OutputFormat {
-    #[default]
-    Markdown,
-    Json,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,7 +444,7 @@ pub struct ConfigOverrides {
     pub summarization_enabled: Option<bool>,
     pub summary_template: Option<String>,
     pub llm_model: Option<String>,
-    pub output_format: Option<OutputFormat>,
+    pub output_json: Option<bool>,
     pub keep_recording: Option<bool>,
 }
 
@@ -529,8 +521,8 @@ impl ConfigOverrides {
         if let Some(value) = &self.llm_model {
             candidate.summarization.model.clone_from(value);
         }
-        if let Some(value) = self.output_format {
-            candidate.output.format = value;
+        if let Some(value) = self.output_json {
+            candidate.output.json = value;
         }
         if let Some(value) = self.keep_recording {
             candidate.output.keep_recording = value;
@@ -783,7 +775,11 @@ mod tests {
             "audio.capture_mode",
             "processes",
         );
-        assert_invalid("[output]\nformat = \"both\"\n", "output.format", "markdown");
+        assert_invalid(
+            "[output]\njson = \"yes\"\n",
+            "output.json",
+            "expected a boolean",
+        );
     }
 
     #[test]

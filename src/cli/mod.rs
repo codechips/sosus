@@ -341,6 +341,16 @@ async fn run_transcribe(
                 transcript_path.display()
             ),
         }
+        if effective.effective.output.json {
+            let json_path = parent.join("transcript.json");
+            match export::write_transcript_json(&json_path, &result) {
+                Ok(()) => eprintln!("Saved transcript JSON: {}", json_path.display()),
+                Err(error) => eprintln!(
+                    "warning: transcript JSON was not saved to {}: {error}",
+                    json_path.display()
+                ),
+            }
+        }
     }
 
     let transcript_save = database

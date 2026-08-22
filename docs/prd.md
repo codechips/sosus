@@ -963,7 +963,7 @@ rrf_k             = 60
 
 [output]
 dir               = "~/sosus/recordings"
-format            = "markdown" # markdown | json
+json              = false      # false = Markdown only; true = Markdown + JSON
 keep_recording    = true
 retention_days    = 0          # 0 = keep forever
 
@@ -1043,7 +1043,7 @@ These override config for one invocation and appear only on commands where they 
 | `--no-summarize` | `record`, `import` | Skip summary and title generation |
 | `--template <name>` | `record`, `summarize`, `import` | Select summary template |
 | `--llm-model <alias-or-path>` | `record`, `summarize`, `import`, `ask` | Override summarization/chat model |
-| `--format <markdown\|json\|both>` | commands that write artifacts | Override artifact format for the invocation; final default semantics depend on D10 |
+| `--json` | commands that write artifacts | Add JSON alongside the mandatory Markdown artifact |
 
 ### 11.3 Recording, archive and query flags
 
