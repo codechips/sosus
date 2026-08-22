@@ -1,7 +1,5 @@
 //! Pinned model metadata and verified, atomic model downloads.
 
-#![allow(dead_code)]
-
 use std::{
     collections::HashSet,
     path::{Component, Path, PathBuf},
@@ -31,6 +29,7 @@ pub struct ModelManifest {
 #[serde(deny_unknown_fields)]
 pub struct ModelEntry {
     pub alias: String,
+    pub asr_backend: String,
     pub repository: String,
     pub revision: String,
     pub origin_url: String,
@@ -94,6 +93,15 @@ impl ModelManifest {
             })
     }
 
+    pub fn asr_model(&self, backend: &str) -> Result<&ModelEntry, ModelError> {
+        self.models
+            .iter()
+            .find(|model| model.asr_backend == backend)
+            .ok_or_else(|| ModelError::MissingBackendModel {
+                backend: backend.to_owned(),
+            })
+    }
+
     fn validate(&self) -> Result<(), ModelError> {
         if self.version != 1 {
             return Err(ModelError::InvalidManifest(format!(
@@ -131,6 +139,17 @@ impl ModelEntry {
             return Err(ModelError::InvalidManifest(format!(
                 "invalid model alias `{}`",
                 self.alias
+            )));
+        }
+        if self.asr_backend.is_empty()
+            || !self
+                .asr_backend
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+        {
+            return Err(ModelError::InvalidManifest(format!(
+                "model `{}` has invalid ASR backend `{}`",
+                self.alias, self.asr_backend
             )));
         }
         if self.repository.split('/').count() != 2 {
@@ -274,6 +293,16 @@ pub async fn ensure_model(
     }
 
     Ok(model_directory)
+}
+
+pub async fn ensure_asr_model(
+    backend: &str,
+    model_root: &Path,
+    progress: &dyn ModelProgressSink,
+) -> Result<PathBuf, ModelError> {
+    let manifest = manifest()?;
+    let alias = manifest.asr_model(backend)?.alias.clone();
+    ensure_model(&alias, model_root, progress).await
 }
 
 async fn download_file(
@@ -529,6 +558,8 @@ pub enum ModelError {
     InvalidManifest(String),
     #[error("unknown model alias `{alias}`; known aliases: {known}")]
     UnknownAlias { alias: String, known: String },
+    #[error("no built-in model is available yet for the `{backend}` ASR backend")]
+    MissingBackendModel { backend: String },
     #[error(
         "model download URL `{url}` is not HTTPS or its host is not allowed; allowed hosts: {allowed}"
     )]

@@ -2,6 +2,7 @@ version = 1
 
 [[models]]
 alias = "parakeet-tdt-0.6b-v3-int8"
+asr_backend = "parakeet"
 repository = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 revision = "2bda32ec70b097a55adaa07d9a7173915b43cc78"
 origin_url = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"

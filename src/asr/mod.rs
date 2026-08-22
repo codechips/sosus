@@ -4,6 +4,7 @@
 
 use std::{fmt, path::PathBuf, sync::Arc};
 
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -40,7 +41,7 @@ impl Audio16kMono {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 #[repr(u8)]
 pub enum TranscriptionBackend {
@@ -285,11 +286,30 @@ pub fn create_transcriber(backend: TranscriptionBackend) -> Box<dyn Transcriber>
 pub enum AsrError {
     #[error("the {backend} backend is not implemented yet")]
     BackendNotImplemented { backend: &'static str },
+    #[error("could not initialize the {backend} backend: {reason}")]
+    BackendInitialization {
+        backend: &'static str,
+        reason: String,
+    },
+    #[error("the {backend} backend returned no recognition result")]
+    MissingResult { backend: &'static str },
+    #[error("the {backend} backend returned invalid native word timings: {reason}")]
+    InvalidWordTimings {
+        backend: &'static str,
+        reason: String,
+    },
+    #[error("vocabulary biasing is unavailable for {backend}: {reason}")]
+    VocabularyUnavailable {
+        backend: &'static str,
+        reason: String,
+    },
     #[error("the {backend} backend cannot provide required word timestamps")]
     WordTimestampsUnsupported { backend: &'static str },
     #[error("transcription was cancelled")]
     Cancelled,
 }
+
+pub use decode::decode_audio_file;
 
 #[cfg(test)]
 mod tests {

@@ -2,7 +2,8 @@
 
 use std::{
     io::{self, IsTerminal},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context, bail};
@@ -10,7 +11,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::time::{Duration, MissedTickBehavior};
 
-use crate::{audio, config, db, logging, paths};
+use crate::{asr, audio, config, db, logging, models, paths};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -41,6 +42,20 @@ enum Command {
     Tui,
     /// Record system audio and the default microphone until Ctrl+C.
     Record,
+    /// Transcribe an existing audio or video file with the configured ASR backend.
+    Transcribe {
+        /// Audio or video file to transcribe.
+        file: PathBuf,
+        /// Override the configured transcription backend.
+        #[arg(long)]
+        backend: Option<asr::TranscriptionBackend>,
+        /// Override the language; omit for automatic detection.
+        #[arg(long)]
+        language: Option<String>,
+        /// Override the physical-core thread default.
+        #[arg(long)]
+        threads: Option<usize>,
+    },
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -49,8 +64,131 @@ pub async fn run() -> anyhow::Result<()> {
     match cli.command {
         Some(Command::Tui) => run_explicit_tui(&cli).await,
         Some(Command::Record) => run_record(&cli).await,
+        Some(Command::Transcribe {
+            ref file,
+            backend,
+            ref language,
+            threads,
+        }) => run_transcribe(&cli, file, backend, language.clone(), threads).await,
         None if io::stdin().is_terminal() && io::stdout().is_terminal() => run_tui(&cli).await,
         None => print_help(),
+    }
+}
+
+async fn run_transcribe(
+    cli: &Cli,
+    file: &Path,
+    backend: Option<asr::TranscriptionBackend>,
+    language: Option<String>,
+    threads: Option<usize>,
+) -> anyhow::Result<()> {
+    let invocation = config::ConfigOverrides {
+        config_path: cli.config.clone(),
+        data_dir: cli.data_dir.clone(),
+        output_dir: cli.output_dir.clone(),
+        backend,
+        language,
+        threads,
+        ..config::ConfigOverrides::default()
+    };
+    let defaults = paths::AppPaths::resolve(None, None, cli.output_dir.as_deref())?;
+    let environment = config::EnvironmentOverrides::from_process();
+    let effective = config::load_effective(
+        defaults.config_file(),
+        defaults.data_dir(),
+        &environment,
+        &invocation,
+    )?;
+    let app_paths = paths::AppPaths::resolve(
+        Some(&effective.locations.config_path),
+        Some(&effective.locations.data_dir),
+        Some(&effective.effective.output.dir),
+    )?;
+    app_paths.ensure_base_directories()?;
+    logging::initialize(app_paths.log_dir())?;
+    for warning in &effective.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    let backend = effective.effective.transcription.backend;
+    let capabilities = backend.capabilities();
+    eprintln!("Preparing {}...", capabilities.display_name);
+    let model_progress = ConsoleModelProgress::new();
+    let model_dir =
+        models::ensure_asr_model(capabilities.id, app_paths.model_dir(), &model_progress)
+            .await
+            .context("could not prepare the transcription model")?;
+    eprintln!();
+
+    let audio = asr::decode_audio_file(file).context("could not decode the input file")?;
+    let thread_count = match effective.effective.transcription.threads {
+        0 => num_cpus::get_physical().max(1),
+        configured => configured,
+    };
+    let mut transcriber = asr::create_transcriber(backend);
+    transcriber
+        .prepare(&asr::PrepareOptions {
+            model_dir,
+            threads: thread_count,
+        })
+        .context("could not initialize transcription")?;
+    let language = (!effective.effective.transcription.language.is_empty())
+        .then(|| effective.effective.transcription.language.clone());
+    eprintln!("Transcribing {:.1}s of audio...", audio.duration_seconds());
+    let result = transcriber
+        .transcribe(
+            &audio,
+            &asr::TranscribeOptions {
+                language,
+                vocabulary: Vec::new(),
+                words_required: true,
+            },
+            &ConsoleAsrProgress,
+        )
+        .context("transcription failed")?;
+
+    for segment in result.segments {
+        println!("{}", segment.text);
+    }
+    Ok(())
+}
+
+struct ConsoleModelProgress {
+    last_percent: AtomicU64,
+}
+
+impl ConsoleModelProgress {
+    fn new() -> Self {
+        Self {
+            last_percent: AtomicU64::new(u64::MAX),
+        }
+    }
+}
+
+impl models::ModelProgressSink for ConsoleModelProgress {
+    fn report(&self, progress: models::DownloadProgress<'_>) {
+        let percent = progress
+            .model_bytes
+            .saturating_mul(100)
+            .checked_div(progress.model_total.max(1))
+            .unwrap_or(0)
+            .min(100);
+        if self.last_percent.swap(percent, Ordering::Relaxed) != percent {
+            eprint!(
+                "\rDownloading {}: {:>3}% ({})",
+                progress.model, percent, progress.file
+            );
+        }
+    }
+}
+
+struct ConsoleAsrProgress;
+
+impl asr::ProgressSink for ConsoleAsrProgress {
+    fn report(&self, fraction: f32) {
+        if fraction >= 1.0 {
+            eprintln!("Transcription complete.");
+        }
     }
 }
 
