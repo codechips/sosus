@@ -46,6 +46,7 @@ use crate::{
 
 const MINIMUM_WIDTH: u16 = 80;
 const MINIMUM_HEIGHT: u16 = 24;
+const PROCESSING_DOTS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,6 +95,8 @@ struct App {
     recording: Option<ActiveRecording>,
     last_recording: Option<String>,
     pipeline_status: Option<String>,
+    pipeline_active: bool,
+    processing_spinner_frame: usize,
     meetings: Vec<Meeting>,
     selected_meeting: usize,
     transcript: Vec<Segment>,
@@ -116,6 +119,8 @@ impl App {
             recording: None,
             last_recording: None,
             pipeline_status: None,
+            pipeline_active: false,
+            processing_spinner_frame: 0,
             meetings: Vec::new(),
             selected_meeting: 0,
             transcript: Vec::new(),
@@ -273,16 +278,23 @@ impl App {
         let completed = matches!(event, PipelineEvent::WorkCompleted);
         match event {
             PipelineEvent::WorkStarted => {
-                self.pipeline_status = Some("Starting pipeline".to_owned())
+                self.pipeline_active = true;
+                self.processing_spinner_frame = 0;
+                self.pipeline_status = Some("Preparing recording".to_owned());
             }
             PipelineEvent::Stage(stage) => self.pipeline_status = Some(stage),
-            PipelineEvent::WorkProgress { completed, total } => {
-                self.pipeline_status = Some(format!("Running {completed}/{total}"));
+            PipelineEvent::WorkProgress { .. } => {}
+            PipelineEvent::WorkCompleted => {
+                self.pipeline_active = false;
+                self.pipeline_status = None;
             }
-            PipelineEvent::WorkCompleted => self.pipeline_status = None,
-            PipelineEvent::WorkCancelled => self.pipeline_status = Some("Cancelled".to_owned()),
+            PipelineEvent::WorkCancelled => {
+                self.pipeline_active = false;
+                self.pipeline_status = Some("Processing cancelled".to_owned());
+            }
             PipelineEvent::WorkFailed(error) => {
-                self.pipeline_status = Some(format!("Failed: {error}"));
+                self.pipeline_active = false;
+                self.pipeline_status = Some(format!("Processing failed: {error}"));
             }
             PipelineEvent::WorkerStopped => {}
         }
@@ -409,6 +421,10 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
 
         tokio::select! {
             _ = tick.tick() => {
+                if app.pipeline_active {
+                    app.processing_spinner_frame =
+                        (app.processing_spinner_frame + 1) % PROCESSING_DOTS.len();
+                }
                 if let Err(error) = app.pump_recording() {
                     let finalize_error = app.stop_recording().err();
                     app.error = Some(match finalize_error {
@@ -776,8 +792,18 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 elapsed % 60
             )),
         ])
-    } else if app.pipeline_status.is_some() {
-        Line::from(" Processing recording")
+    } else if let Some(stage) = &app.pipeline_status {
+        if app.pipeline_active {
+            Line::from(vec![
+                Span::styled(
+                    format!(" {}", PROCESSING_DOTS[app.processing_spinner_frame]),
+                    theme::meter_signal(),
+                ),
+                Span::raw(format!(" {stage}")),
+            ])
+        } else {
+            Line::from(format!(" {stage}"))
+        }
     } else if let Some(message) = &app.message {
         Line::from(format!(" {message}"))
     } else {
@@ -849,6 +875,25 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
             Some(AppAction::ToggleRecording)
         );
+    }
+
+    #[test]
+    fn pipeline_status_keeps_the_current_user_facing_stage() {
+        let mut app = app();
+        app.handle_pipeline_event(PipelineEvent::WorkStarted);
+        assert!(app.pipeline_active);
+        assert_eq!(app.pipeline_status.as_deref(), Some("Preparing recording"));
+
+        app.handle_pipeline_event(PipelineEvent::Stage("Transcribing".to_owned()));
+        app.handle_pipeline_event(PipelineEvent::WorkProgress {
+            completed: 1,
+            total: 3,
+        });
+        assert_eq!(app.pipeline_status.as_deref(), Some("Transcribing"));
+
+        app.handle_pipeline_event(PipelineEvent::WorkCompleted);
+        assert!(!app.pipeline_active);
+        assert!(app.pipeline_status.is_none());
     }
 
     #[test]
