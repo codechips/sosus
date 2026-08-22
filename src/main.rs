@@ -8,6 +8,7 @@ mod export;
 mod index;
 mod llm;
 mod logging;
+mod models;
 mod paths;
 mod pipeline;
 mod tui;

@@ -47,7 +47,8 @@
 *.gguf
 *.onnx
 *.safetensors
-/models/
+/models/*
+!/models/manifest.toml
 
 # Safe fixtures matching these patterns require deliberate `git add -f` after
 # their provenance and redistribution rights have been reviewed.

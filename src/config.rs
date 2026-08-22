@@ -10,22 +10,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// ISO 639-1 codes supported by NVIDIA Parakeet TDT 0.6B v3.
-pub const PARAKEET_LANGUAGES: &[&str] = &[
-    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt",
-    "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
-];
-
-/// Language codes accepted by the 99-language Whisper multilingual models.
-pub const WHISPER_LANGUAGES: &[&str] = &[
-    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv", "it",
-    "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no", "th", "ur",
-    "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn",
-    "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw", "gl", "mr", "pa", "si",
-    "km", "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo",
-    "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "haw", "ln",
-    "ha", "ba", "jw", "su",
-];
+pub use crate::asr::TranscriptionBackend;
+#[cfg(test)]
+use crate::asr::{PARAKEET_LANGUAGES, WHISPER_LANGUAGES};
 
 const BUILT_IN_TEMPLATES: &[&str] = &["meeting", "lecture", "brief"];
 
@@ -201,24 +188,6 @@ impl Default for TranscriptionConfig {
             language: String::new(),
             threads: 0,
             initial_prompt: String::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TranscriptionBackend {
-    #[default]
-    Parakeet,
-    Whisper,
-}
-
-impl TranscriptionBackend {
-    #[must_use]
-    pub fn supported_languages(self) -> &'static [&'static str] {
-        match self {
-            Self::Parakeet => PARAKEET_LANGUAGES,
-            Self::Whisper => WHISPER_LANGUAGES,
         }
     }
 }
@@ -649,39 +618,8 @@ pub fn load_effective(
 }
 
 fn validate_language(backend: TranscriptionBackend, language: &str) -> Result<(), ConfigError> {
-    if language.is_empty() {
-        return Ok(());
-    }
-    if !(2..=3).contains(&language.len()) || !language.bytes().all(|byte| byte.is_ascii_lowercase())
-    {
-        return Err(invalid(
-            "transcription.language",
-            "expected an empty string for auto-detection or a supported lowercase ISO language code",
-        ));
-    }
-    if !backend.supported_languages().contains(&language) {
-        let (backend_name, alternative_name, alternative) = match backend {
-            TranscriptionBackend::Parakeet => {
-                ("parakeet", "whisper", TranscriptionBackend::Whisper)
-            }
-            TranscriptionBackend::Whisper => {
-                ("whisper", "parakeet", TranscriptionBackend::Parakeet)
-            }
-        };
-        let suggestion = if alternative.supported_languages().contains(&language) {
-            format!(" Select the `{alternative_name}` backend for `{language}`.")
-        } else {
-            String::new()
-        };
-        return Err(invalid(
-            "transcription.language",
-            format!(
-                "`{language}` is not supported by {backend_name}; supported codes: {}.{suggestion}",
-                backend.supported_languages().join(", ")
-            ),
-        ));
-    }
-    Ok(())
+    crate::asr::validate_language(backend, language)
+        .map_err(|error| invalid("transcription.language", error.to_string()))
 }
 
 fn validate_f64_range(key: &str, value: f64, min: f64, max: f64) -> Result<(), ConfigError> {
