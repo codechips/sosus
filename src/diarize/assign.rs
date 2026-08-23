@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::asr::{Segment, TranscriptResult};
+use crate::asr::{Segment, TranscriptResult, Word};
 
 const MAX_INHERITED_GAP_SECONDS: f64 = 1.0;
 
@@ -91,20 +91,20 @@ pub fn split_segments_by_speaker(transcript: &mut TranscriptResult) {
 
         let fallback_speaker = segment.speaker.clone();
         let mut grouped = Vec::<Segment>::new();
-        for word in segment.words {
-            let speaker = word.speaker.clone().or_else(|| fallback_speaker.clone());
+        for token in lexical_tokens(segment.words, fallback_speaker) {
+            let speaker = token.speaker;
             if let Some(current) = grouped.last_mut()
                 && current.speaker == speaker
             {
-                current.end_seconds = word.end_seconds;
-                current.text.push_str(&word.text);
-                current.words.push(word);
+                current.end_seconds = token.end_seconds;
+                current.text.push_str(&token.text);
+                current.words.extend(token.words);
             } else {
                 grouped.push(Segment {
-                    start_seconds: word.start_seconds,
-                    end_seconds: word.end_seconds,
-                    text: word.text.clone(),
-                    words: vec![word],
+                    start_seconds: token.start_seconds,
+                    end_seconds: token.end_seconds,
+                    text: token.text,
+                    words: token.words,
                     speaker,
                 });
             }
@@ -117,6 +117,83 @@ pub fn split_segments_by_speaker(transcript: &mut TranscriptResult) {
     }
 
     transcript.segments = segments;
+}
+
+struct LexicalToken {
+    start_seconds: f64,
+    end_seconds: f64,
+    text: String,
+    words: Vec<Word>,
+    speaker: Option<String>,
+}
+
+fn lexical_tokens(words: Vec<Word>, fallback_speaker: Option<String>) -> Vec<LexicalToken> {
+    let mut tokens = Vec::<LexicalToken>::new();
+    for word in words {
+        let punctuation = is_punctuation_piece(&word.text);
+        let starts_token = starts_with_whitespace(&word.text) && !punctuation;
+        if starts_token && !tokens.is_empty() {
+            tokens.push(LexicalToken {
+                start_seconds: word.start_seconds,
+                end_seconds: word.end_seconds,
+                text: word.text.clone(),
+                words: vec![word],
+                speaker: None,
+            });
+            continue;
+        }
+
+        if let Some(token) = tokens.last_mut() {
+            token.end_seconds = word.end_seconds;
+            append_piece(&mut token.text, &word.text, punctuation);
+            token.words.push(word);
+        } else {
+            tokens.push(LexicalToken {
+                start_seconds: word.start_seconds,
+                end_seconds: word.end_seconds,
+                text: word.text.clone(),
+                words: vec![word],
+                speaker: None,
+            });
+        }
+    }
+
+    for token in &mut tokens {
+        // A speaker transition can land inside a SentencePiece word. Use the
+        // final labelled piece so a boundary at the beginning of a word does
+        // not leave its first character with the previous speaker.
+        token.speaker = token
+            .words
+            .iter()
+            .rev()
+            .filter(|word| !is_punctuation_piece(&word.text))
+            .find_map(|word| word.speaker.clone())
+            .or_else(|| fallback_speaker.clone());
+        for word in &mut token.words {
+            word.speaker = token.speaker.clone();
+        }
+    }
+    tokens
+}
+
+fn starts_with_whitespace(text: &str) -> bool {
+    text.chars().next().is_some_and(char::is_whitespace)
+}
+
+fn is_punctuation_piece(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().all(|character| {
+            character.is_ascii_punctuation() || matches!(character, '…' | '–' | '—')
+        })
+}
+
+fn append_piece(target: &mut String, piece: &str, punctuation: bool) {
+    if punctuation {
+        target.push_str(piece.trim());
+    } else {
+        target.push_str(piece);
+    }
 }
 
 fn valid_sorted_turns(turns: &[DiarizationTurn]) -> Vec<&DiarizationTurn> {
@@ -441,5 +518,67 @@ mod tests {
         assert_eq!(transcript.segments[1].text, "Hi back");
         assert_eq!(transcript.segments[1].start_seconds, 3.0);
         assert_eq!(transcript.segments[1].end_seconds, 6.0);
+    }
+
+    #[test]
+    fn keeps_subword_fragments_and_punctuation_with_one_speaker() {
+        let mut transcript = transcript(&[(0.0, 2.0)]);
+        transcript.segments[0].words = vec![
+            Word {
+                start_seconds: 0.0,
+                end_seconds: 0.2,
+                text: " V".to_owned(),
+                score: 0.0,
+                speaker: Some("Speaker 2".to_owned()),
+            },
+            Word {
+                start_seconds: 0.2,
+                end_seconds: 0.4,
+                text: "em".to_owned(),
+                score: 0.0,
+                speaker: Some("Speaker 1".to_owned()),
+            },
+            Word {
+                start_seconds: 0.4,
+                end_seconds: 0.6,
+                text: " svar".to_owned(),
+                score: 0.0,
+                speaker: Some("Speaker 2".to_owned()),
+            },
+            Word {
+                start_seconds: 0.6,
+                end_seconds: 0.8,
+                text: "ar".to_owned(),
+                score: 0.0,
+                speaker: Some("Speaker 2".to_owned()),
+            },
+            Word {
+                start_seconds: 0.8,
+                end_seconds: 0.9,
+                text: "?".to_owned(),
+                score: 0.0,
+                speaker: Some("Speaker 1".to_owned()),
+            },
+        ];
+
+        split_segments_by_speaker(&mut transcript);
+
+        assert_eq!(transcript.segments.len(), 2);
+        assert_eq!(transcript.segments[0].speaker.as_deref(), Some("Speaker 1"));
+        assert_eq!(transcript.segments[0].text, "Vem");
+        assert!(
+            transcript.segments[0]
+                .words
+                .iter()
+                .all(|word| word.speaker.as_deref() == Some("Speaker 1"))
+        );
+        assert_eq!(transcript.segments[1].speaker.as_deref(), Some("Speaker 2"));
+        assert_eq!(transcript.segments[1].text, "svarar?");
+        assert!(
+            transcript.segments[1]
+                .words
+                .iter()
+                .all(|word| word.speaker.as_deref() == Some("Speaker 2"))
+        );
     }
 }
