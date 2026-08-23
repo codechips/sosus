@@ -758,9 +758,9 @@ impl App {
         } else if self.confirm_quit_processing {
             render_quit_processing_confirmation(frame, centered_rect(54, 28, area));
         } else if let Some(meeting) = &self.retranscribe_confirmation {
-            render_retranscribe_confirmation(frame, &meeting.name, centered_rect(54, 28, area));
+            render_retranscribe_confirmation(frame, &meeting.name, centered_rect(58, 40, area));
         } else if let Some(picker) = &self.retranscribe_speakers {
-            render_retranscribe_speaker_picker(frame, picker, centered_rect(46, 38, area));
+            render_retranscribe_speaker_picker(frame, picker, centered_rect(70, 38, area));
         } else if let Some(meeting) = &self.delete_confirmation {
             render_delete_confirmation(frame, &meeting.name, centered_rect(54, 28, area));
         }
@@ -1557,19 +1557,20 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, meeting_name: &str, area: R
 
 fn render_retranscribe_confirmation(frame: &mut Frame<'_>, meeting_name: &str, area: Rect) {
     let content = Text::from(vec![
-        Line::styled("Re-transcribe this recording?", theme::warning_text()),
-        Line::from(""),
-        Line::styled(meeting_name, theme::primary_text()),
-        Line::from(""),
         Line::styled(
-            "The existing transcript will be replaced only when processing succeeds.",
+            format!("Re-transcribe {meeting_name}?"),
+            theme::warning_text(),
+        ),
+        Line::styled(
+            "The current transcript stays until the replacement succeeds.",
             theme::secondary_text(),
         ),
-        Line::from(""),
-        Line::styled(
-            "Enter to continue · Esc or t to cancel",
-            theme::secondary_text(),
-        ),
+        Line::from(vec![
+            Span::styled("[Enter]", theme::primary_text()),
+            Span::raw(" Continue   "),
+            Span::styled("[Esc]", theme::primary_text()),
+            Span::raw(" Cancel"),
+        ]),
     ]);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1591,37 +1592,35 @@ fn render_retranscribe_speaker_picker(
     area: Rect,
 ) {
     let options = [
-        "Auto",
-        "1 speaker",
-        "2 speakers",
-        "3 speakers",
-        "4 speakers",
-        "5 speakers",
-        "6 speakers",
+        (None, "Auto"),
+        (Some(1), "1"),
+        (Some(2), "2"),
+        (Some(3), "3"),
+        (Some(4), "4"),
+        (Some(5), "5"),
+        (Some(6), "6"),
     ];
-    let selected = picker.diarization.label();
-    let mut lines = vec![
-        Line::styled("Expected speakers", theme::primary_text()),
-        Line::from(""),
-    ];
-    lines.extend(options.into_iter().map(|option| {
-        let marker = if option == selected { "› " } else { "  " };
-        Line::styled(
-            format!("{marker}{option}"),
-            if option == selected {
-                theme::primary_text()
+    let selected = picker.diarization.expected_speakers;
+    let mut choices = Vec::new();
+    for (value, option) in options {
+        choices.push(Span::styled(
+            format!("[{option}]"),
+            if value == selected {
+                theme::selected_row()
             } else {
                 theme::secondary_text()
             },
-        )
-    }));
-    lines.extend([
-        Line::from(""),
+        ));
+        choices.push(Span::raw(" "));
+    }
+    let lines = vec![
+        Line::styled("Expected speakers", theme::primary_text()),
+        Line::from(choices),
         Line::styled(
-            "↑/↓ or 0–6 choose · Enter start · Esc cancel",
+            "[↑/↓ or 0–6] Choose   [Enter] Start   [Esc] Cancel",
             theme::secondary_text(),
         ),
-    ]);
+    ];
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Re-transcribe")
@@ -2219,6 +2218,36 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Terminal too small"));
+    }
+
+    #[test]
+    fn retranscribe_speaker_picker_fits_all_choices_and_controls_in_a_small_modal() {
+        let backend = TestBackend::new(56, 9);
+        let mut terminal = Terminal::new(backend).expect("test terminal should construct");
+        let picker = RetranscribeSpeakerPicker {
+            path: PathBuf::from("/tmp/meeting"),
+            diarization: RecordingDiarization {
+                enabled: true,
+                expected_speakers: Some(2),
+            },
+        };
+        terminal
+            .draw(|frame| {
+                render_retranscribe_speaker_picker(frame, &picker, Rect::new(0, 0, 56, 9));
+            })
+            .expect("render should succeed");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for choice in ["[Auto]", "[1]", "[2]", "[3]", "[4]", "[5]", "[6]"] {
+            assert!(rendered.contains(choice), "missing {choice}");
+        }
+        assert!(rendered.contains("[Enter] Start"));
+        assert!(rendered.contains("[Esc] Cancel"));
     }
 
     #[test]
