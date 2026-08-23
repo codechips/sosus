@@ -18,6 +18,10 @@ mise run dev
 
 Press `r` to start or stop recording. Use F2 for language, transcription model, diarization, and recording settings.
 
+Press `?` in the TUI to see every shortcut. The essential controls are `r` to
+record, `m` to mute the microphone while recording, `t` to process a selected
+recording, `o` to reveal it in Finder, and `d` to delete it with confirmation.
+
 ## CLI examples
 
 Launch the TUI:
@@ -46,6 +50,14 @@ Import an existing file into the meeting archive, or resume a meeting whose proc
 sosus import ~/Downloads/meeting.m4a
 sosus resume ~/sosus/recordings/2026-08-22_1430
 ```
+
+## Storage and privacy
+
+By default, recordings live in `~/sosus/recordings`. Configuration, downloaded
+models, and redacted logs use the platform data directories; `--output-dir`,
+`--data-dir`, and `--config` override them for a single invocation. All audio,
+transcription, and diarization run locally. Model downloads occur only when a
+selected model is not already present.
 
 ## Development
 
