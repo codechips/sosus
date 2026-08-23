@@ -758,9 +758,9 @@ impl App {
         } else if self.confirm_quit_processing {
             render_quit_processing_confirmation(frame, centered_rect(54, 28, area));
         } else if let Some(meeting) = &self.retranscribe_confirmation {
-            render_retranscribe_confirmation(frame, &meeting.name, centered_rect(58, 40, area));
+            render_retranscribe_confirmation(frame, &meeting.name, centered_rect(58, 50, area));
         } else if let Some(picker) = &self.retranscribe_speakers {
-            render_retranscribe_speaker_picker(frame, picker, centered_rect(70, 38, area));
+            render_retranscribe_speaker_picker(frame, picker, centered_rect(70, 50, area));
         } else if let Some(meeting) = &self.delete_confirmation {
             render_delete_confirmation(frame, &meeting.name, centered_rect(54, 28, area));
         }
@@ -1561,10 +1561,12 @@ fn render_retranscribe_confirmation(frame: &mut Frame<'_>, meeting_name: &str, a
             format!("Re-transcribe {meeting_name}?"),
             theme::warning_text(),
         ),
+        Line::from(""),
         Line::styled(
             "The current transcript stays until the replacement succeeds.",
             theme::secondary_text(),
         ),
+        Line::from(""),
         Line::from(vec![
             Span::styled("[Enter]", theme::primary_text()),
             Span::raw(" Continue   "),
@@ -1576,7 +1578,7 @@ fn render_retranscribe_confirmation(frame: &mut Frame<'_>, meeting_name: &str, a
         .borders(Borders::ALL)
         .title("Re-transcribe")
         .style(theme::overlay())
-        .padding(Padding::uniform(1));
+        .padding(Padding::uniform(2));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(content)
@@ -1615,9 +1617,11 @@ fn render_retranscribe_speaker_picker(
     }
     let lines = vec![
         Line::styled("Expected speakers", theme::primary_text()),
+        Line::from(""),
         Line::from(choices),
+        Line::from(""),
         Line::styled(
-            "[↑/↓ or 0–6] Choose   [Enter] Start   [Esc] Cancel",
+            "[↑/↓/0–6] Select   [Enter] Start   [Esc] Cancel",
             theme::secondary_text(),
         ),
     ];
@@ -1625,7 +1629,7 @@ fn render_retranscribe_speaker_picker(
         .borders(Borders::ALL)
         .title("Re-transcribe")
         .style(theme::overlay())
-        .padding(Padding::uniform(1));
+        .padding(Padding::uniform(2));
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
 }
@@ -2222,7 +2226,7 @@ mod tests {
 
     #[test]
     fn retranscribe_speaker_picker_fits_all_choices_and_controls_in_a_small_modal() {
-        let backend = TestBackend::new(56, 9);
+        let backend = TestBackend::new(56, 12);
         let mut terminal = Terminal::new(backend).expect("test terminal should construct");
         let picker = RetranscribeSpeakerPicker {
             path: PathBuf::from("/tmp/meeting"),
@@ -2233,7 +2237,7 @@ mod tests {
         };
         terminal
             .draw(|frame| {
-                render_retranscribe_speaker_picker(frame, &picker, Rect::new(0, 0, 56, 9));
+                render_retranscribe_speaker_picker(frame, &picker, Rect::new(0, 0, 56, 12));
             })
             .expect("render should succeed");
         let rendered = terminal
