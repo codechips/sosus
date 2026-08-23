@@ -19,8 +19,9 @@ mise run dev
 Press `r` to start or stop recording. Use F2 for language, transcription model, diarization, and recording settings.
 
 Press `?` in the TUI to see every shortcut. The essential controls are `r` to
-record, `m` to mute the microphone while recording, `t` to process a selected
-recording, `o` to reveal it in Finder, and `d` to delete it with confirmation.
+record, `m` to mute the microphone while recording, `s` to cycle the expected
+speaker count for the current recording, `t` to process a selected recording,
+`o` to reveal it in Finder, and `d` to delete it with confirmation.
 
 ## CLI examples
 

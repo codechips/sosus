@@ -110,6 +110,18 @@ enum Command {
     Resume {
         /// Meeting folder or recording file to resume.
         meeting: PathBuf,
+        /// Skip speaker diarization for this invocation.
+        #[arg(long)]
+        no_diarize: bool,
+        /// Expected speaker count: `auto` or an exact positive number.
+        #[arg(long, value_name = "auto|N", conflicts_with_all = ["min_speakers", "max_speakers"])]
+        speakers: Option<ExpectedSpeakerCount>,
+        /// Require at least this many speakers (zero = auto).
+        #[arg(long, value_name = "N")]
+        min_speakers: Option<usize>,
+        /// Allow at most this many speakers (zero = auto).
+        #[arg(long, value_name = "N")]
+        max_speakers: Option<usize>,
     },
 }
 
@@ -153,7 +165,22 @@ pub async fn run() -> anyhow::Result<()> {
             )
             .await
         }
-        Some(Command::Resume { ref meeting }) => run_resume(&cli, meeting).await,
+        Some(Command::Resume {
+            ref meeting,
+            no_diarize,
+            speakers,
+            min_speakers,
+            max_speakers,
+        }) => {
+            let (min_speakers, max_speakers) = match speakers {
+                Some(expected) => {
+                    let (min, max) = expected.bounds();
+                    (Some(min), Some(max))
+                }
+                None => (min_speakers, max_speakers),
+            };
+            run_resume(&cli, meeting, no_diarize, min_speakers, max_speakers).await
+        }
         Some(Command::Import { ref file }) => {
             run_transcribe(
                 &cli,
@@ -177,7 +204,13 @@ pub async fn run() -> anyhow::Result<()> {
     }
 }
 
-async fn run_resume(cli: &Cli, meeting: &Path) -> anyhow::Result<()> {
+async fn run_resume(
+    cli: &Cli,
+    meeting: &Path,
+    no_diarize: bool,
+    min_speakers: Option<usize>,
+    max_speakers: Option<usize>,
+) -> anyhow::Result<()> {
     let defaults = paths::AppPaths::resolve(None, None, cli.output_dir.as_deref())?;
     let environment = config::EnvironmentOverrides::from_process();
     let invocation = config::ConfigOverrides {
@@ -247,9 +280,9 @@ async fn run_resume(cli: &Cli, meeting: &Path) -> anyhow::Result<()> {
             backend: None,
             language: None,
             threads: None,
-            no_diarize: false,
-            min_speakers: None,
-            max_speakers: None,
+            no_diarize,
+            min_speakers,
+            max_speakers,
             existing_meeting: Some(meeting_dir),
             resume_state,
             resume_transcript,
@@ -857,6 +890,7 @@ mod tests {
             ])
             .is_err()
         );
+        assert!(Cli::try_parse_from(["sosus", "resume", "meeting", "--speakers", "2",]).is_ok());
     }
 
     #[test]

@@ -330,6 +330,11 @@ impl App {
             }
             (KeyCode::Char('r'), _) => return Some(AppAction::ToggleRecording),
             (KeyCode::Char('m'), _) => return microphone_mute_action(self.recording.is_some()),
+            (KeyCode::Char('s'), _) if self.recording.is_some() => {
+                if let Some(active) = &mut self.recording {
+                    active.diarization.cycle_expected_speakers();
+                }
+            }
             (KeyCode::Char('t'), _) if self.recording.is_none() && !self.pipeline_active => {
                 if let Some(meeting) = self.meetings.get(self.selected_meeting) {
                     return Some(AppAction::TranscribeMeeting(meeting.path.clone()));
@@ -505,13 +510,18 @@ impl App {
         self.recording = Some(ActiveRecording {
             session,
             meeting_dir,
+            diarization: RecordingDiarization::from_config(
+                self.settings_context
+                    .as_ref()
+                    .map(|context| &context.config),
+            ),
         });
         self.input_levels = Some((0.0, 0.0));
         self.message = None;
         Ok(())
     }
 
-    fn stop_recording(&mut self) -> anyhow::Result<Option<PathBuf>> {
+    fn stop_recording(&mut self) -> anyhow::Result<Option<CompletedRecording>> {
         let Some(active) = self.recording.take() else {
             return Ok(None);
         };
@@ -534,7 +544,10 @@ impl App {
         if outcome.microphone_failed {
             self.message = Some("Saved recording; microphone stream was lost".to_owned());
         }
-        Ok(Some(outcome.path))
+        Ok(Some(CompletedRecording {
+            path: outcome.path,
+            diarization: active.diarization,
+        }))
     }
 
     fn pump_recording(&mut self) -> anyhow::Result<()> {
@@ -755,6 +768,60 @@ impl PickerKind {
 struct ActiveRecording {
     session: audio::RecordingSession,
     meeting_dir: PathBuf,
+    diarization: RecordingDiarization,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RecordingDiarization {
+    enabled: bool,
+    expected_speakers: Option<usize>,
+}
+
+impl RecordingDiarization {
+    fn from_config(config: Option<&Config>) -> Self {
+        let Some(config) = config else {
+            return Self {
+                enabled: false,
+                expected_speakers: None,
+            };
+        };
+        let diarization = &config.diarization;
+        let expected_speakers = (diarization.min_speakers > 0
+            && diarization.min_speakers == diarization.max_speakers)
+            .then_some(diarization.min_speakers);
+        Self {
+            enabled: diarization.enabled,
+            expected_speakers,
+        }
+    }
+
+    fn cycle_expected_speakers(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.expected_speakers = match self.expected_speakers {
+            None => Some(1),
+            Some(count) if count < 6 => Some(count + 1),
+            Some(_) => None,
+        };
+    }
+
+    fn label(self) -> &'static str {
+        match self.expected_speakers {
+            None => "Auto",
+            Some(1) => "1 speaker",
+            Some(2) => "2 speakers",
+            Some(3) => "3 speakers",
+            Some(4) => "4 speakers",
+            Some(5) => "5 speakers",
+            Some(_) => "6 speakers",
+        }
+    }
+}
+
+struct CompletedRecording {
+    path: PathBuf,
+    diarization: RecordingDiarization,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -813,8 +880,13 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                         match app.handle_key(key) {
                             Some(AppAction::ToggleRecording) if app.recording.is_some() => {
                                 match app.stop_recording() {
-                                    Ok(Some(path)) => {
-                                        launch_pipeline(&mut app, path, &pipeline_tx)
+                                    Ok(Some(recording)) => {
+                                        launch_pipeline(
+                                            &mut app,
+                                            recording.path,
+                                            Some(recording.diarization),
+                                            &pipeline_tx,
+                                        )
                                     }
                                     Ok(None) => {}
                                     Err(error) => app.error = Some(format!("{error:#}")),
@@ -832,8 +904,13 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                             }
                             Some(AppAction::StopRecording) => {
                                 match app.stop_recording() {
-                                    Ok(Some(path)) => {
-                                        launch_pipeline(&mut app, path, &pipeline_tx)
+                                    Ok(Some(recording)) => {
+                                        launch_pipeline(
+                                            &mut app,
+                                            recording.path,
+                                            Some(recording.diarization),
+                                            &pipeline_tx,
+                                        )
                                     }
                                     Ok(None) => {}
                                     Err(error) => app.error = Some(format!("{error:#}")),
@@ -847,7 +924,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                                 }
                             }
                             Some(AppAction::TranscribeMeeting(path)) => {
-                                launch_pipeline(&mut app, path, &pipeline_tx);
+                                launch_pipeline(&mut app, path, None, &pipeline_tx);
                             }
                             Some(AppAction::OpenMeetingFolder(path)) => {
                                 if let Err(error) = open_meeting_folder(&path) {
@@ -907,6 +984,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
 fn launch_pipeline(
     app: &mut App,
     recording_path: PathBuf,
+    diarization: Option<RecordingDiarization>,
     events: &mpsc::UnboundedSender<PipelineEvent>,
 ) {
     let Some(context) = &app.recording_context else {
@@ -918,13 +996,26 @@ fn launch_pipeline(
     app.handle_pipeline_event(PipelineEvent::WorkStarted);
     let events = events.clone();
     tokio::spawn(async move {
-        let result = TokioCommand::new(std::env::current_exe().expect("current executable"))
+        let mut command = TokioCommand::new(std::env::current_exe().expect("current executable"));
+        command
             .args(["resume"])
             .arg(recording_path)
             .args(["--config"])
             .arg(config_path)
             .args(["--output-dir"])
-            .arg(output_dir)
+            .arg(output_dir);
+        if let Some(diarization) = diarization {
+            if diarization.enabled {
+                command.arg("--speakers").arg(
+                    diarization
+                        .expected_speakers
+                        .map_or("auto".to_owned(), |count| count.to_string()),
+                );
+            } else {
+                command.arg("--no-diarize");
+            }
+        }
+        let result = command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn();
@@ -1197,6 +1288,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("F2               Settings"),
         Line::from("r                Start / stop recording"),
         Line::from("m                Mute / unmute microphone"),
+        Line::from("s                Change expected speakers while recording"),
         Line::from("t                Transcribe selected recording"),
         Line::from("o                Open selected recording in Finder"),
         Line::from("d / D            Delete with confirmation / immediately"),
@@ -1361,10 +1453,15 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         } else {
             "·  m to mute"
         };
+        let speaker_status = if active.diarization.enabled {
+            format!(" · {} · s to change", active.diarization.label())
+        } else {
+            String::new()
+        };
         Line::from(vec![
             Span::styled(" ●", theme::recording_indicator()),
             Span::raw(format!(
-                " Recording  {:02}:{:02}  ·  r to stop {microphone_status}",
+                " Recording  {:02}:{:02}  ·  r to stop {microphone_status}{speaker_status}",
                 elapsed / 60,
                 elapsed % 60
             )),
@@ -1648,6 +1745,30 @@ mod tests {
             microphone_mute_action(true),
             Some(AppAction::ToggleMicrophoneMute)
         );
+    }
+
+    #[test]
+    fn recording_speaker_count_cycles_from_auto_through_six() {
+        let mut diarization = RecordingDiarization {
+            enabled: true,
+            expected_speakers: None,
+        };
+        for expected in 1..=6 {
+            diarization.cycle_expected_speakers();
+            assert_eq!(diarization.expected_speakers, Some(expected));
+        }
+        diarization.cycle_expected_speakers();
+        assert_eq!(diarization.expected_speakers, None);
+    }
+
+    #[test]
+    fn recording_speaker_count_is_inert_when_diarization_is_disabled() {
+        let mut diarization = RecordingDiarization {
+            enabled: false,
+            expected_speakers: Some(2),
+        };
+        diarization.cycle_expected_speakers();
+        assert_eq!(diarization.expected_speakers, Some(2));
     }
 
     #[test]
