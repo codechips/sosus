@@ -110,6 +110,9 @@ enum Command {
     Resume {
         /// Meeting folder or recording file to resume.
         meeting: PathBuf,
+        /// Re-run transcription even if the saved pipeline has completed it.
+        #[arg(long)]
+        force: bool,
         /// Skip speaker diarization for this invocation.
         #[arg(long)]
         no_diarize: bool,
@@ -167,6 +170,7 @@ pub async fn run() -> anyhow::Result<()> {
         }
         Some(Command::Resume {
             ref meeting,
+            force,
             no_diarize,
             speakers,
             min_speakers,
@@ -179,7 +183,7 @@ pub async fn run() -> anyhow::Result<()> {
                 }
                 None => (min_speakers, max_speakers),
             };
-            run_resume(&cli, meeting, no_diarize, min_speakers, max_speakers).await
+            run_resume(&cli, meeting, force, no_diarize, min_speakers, max_speakers).await
         }
         Some(Command::Import { ref file }) => {
             run_transcribe(
@@ -207,6 +211,7 @@ pub async fn run() -> anyhow::Result<()> {
 async fn run_resume(
     cli: &Cli,
     meeting: &Path,
+    force: bool,
     no_diarize: bool,
     min_speakers: Option<usize>,
     max_speakers: Option<usize>,
@@ -241,7 +246,7 @@ async fn run_resume(
     }
     let meeting_dir = audio_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let state_path = meeting_dir.join(pipeline::PipelineState::STATE_FILE);
-    let resume_state = if state_path.is_file() {
+    let resume_state = if !force && state_path.is_file() {
         let mut state = pipeline::PipelineState::load(&meeting_dir).with_context(|| {
             format!(
                 "could not load pipeline state from {}",

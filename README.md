@@ -20,7 +20,8 @@ Press `r` to start or stop recording. Use F2 for language, transcription model, 
 
 Press `?` in the TUI to see every shortcut. The essential controls are `r` to
 record, `m` to mute the microphone while recording, `s` to cycle the expected
-speaker count for the current recording, `t` to process a selected recording,
+speaker count for the current recording, `t` to process a selected recording
+or re-transcribe an existing transcript,
 `o` to reveal it in Finder, and `d` to delete it with confirmation.
 
 ## CLI examples

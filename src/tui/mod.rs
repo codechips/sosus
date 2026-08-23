@@ -101,6 +101,8 @@ struct App {
     settings_context: Option<SettingsContext>,
     confirm_quit_processing: bool,
     delete_confirmation: Option<Meeting>,
+    retranscribe_confirmation: Option<Meeting>,
+    retranscribe_speakers: Option<RetranscribeSpeakerPicker>,
     should_quit: bool,
     message: Option<String>,
     warnings: VecDeque<String>,
@@ -136,6 +138,8 @@ impl App {
             }),
             confirm_quit_processing: false,
             delete_confirmation: None,
+            retranscribe_confirmation: None,
+            retranscribe_speakers: None,
             should_quit: false,
             message: None,
             warnings: startup.warnings.into(),
@@ -211,6 +215,68 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppAction> {
+        if let Some(picker) = &mut self.retranscribe_speakers {
+            match (key.code, key.modifiers) {
+                (KeyCode::Enter, _) => {
+                    let picker = self
+                        .retranscribe_speakers
+                        .take()
+                        .expect("speaker picker should be present");
+                    return Some(AppAction::TranscribeMeeting {
+                        path: picker.path,
+                        force: true,
+                        diarization: Some(picker.diarization),
+                    });
+                }
+                (KeyCode::Esc, _) => self.retranscribe_speakers = None,
+                (KeyCode::Up | KeyCode::Char('k'), _) => {
+                    picker.diarization.previous_expected_speakers()
+                }
+                (KeyCode::Down | KeyCode::Char('j'), _) => {
+                    picker.diarization.cycle_expected_speakers()
+                }
+                (KeyCode::Char('0'), _) => picker.diarization.expected_speakers = None,
+                (KeyCode::Char(value), _) if ('1'..='6').contains(&value) => {
+                    picker.diarization.expected_speakers = Some((value as u8 - b'0') as usize);
+                }
+                _ => {}
+            }
+            return None;
+        }
+
+        if self.retranscribe_confirmation.is_some() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Enter, _) => {
+                    let meeting = self
+                        .retranscribe_confirmation
+                        .take()
+                        .expect("retranscription confirmation should contain a meeting");
+                    let diarization = RecordingDiarization::from_config(
+                        self.settings_context
+                            .as_ref()
+                            .map(|context| &context.config),
+                    );
+                    if diarization.enabled {
+                        self.retranscribe_speakers = Some(RetranscribeSpeakerPicker {
+                            path: meeting.path,
+                            diarization,
+                        });
+                    } else {
+                        return Some(AppAction::TranscribeMeeting {
+                            path: meeting.path,
+                            force: true,
+                            diarization: Some(diarization),
+                        });
+                    }
+                }
+                (KeyCode::Esc, _) | (KeyCode::Char('t'), _) => {
+                    self.retranscribe_confirmation = None;
+                }
+                _ => {}
+            }
+            return None;
+        }
+
         if self.delete_confirmation.is_some() {
             match (key.code, key.modifiers) {
                 (KeyCode::Enter, _) => {
@@ -337,7 +403,15 @@ impl App {
             }
             (KeyCode::Char('t'), _) if self.recording.is_none() && !self.pipeline_active => {
                 if let Some(meeting) = self.meetings.get(self.selected_meeting) {
-                    return Some(AppAction::TranscribeMeeting(meeting.path.clone()));
+                    if meeting.path.join("transcript.md").is_file() {
+                        self.retranscribe_confirmation = Some(meeting.clone());
+                    } else {
+                        return Some(AppAction::TranscribeMeeting {
+                            path: meeting.path.clone(),
+                            force: false,
+                            diarization: None,
+                        });
+                    }
                 }
             }
             (KeyCode::Char('o'), _) => {
@@ -372,6 +446,8 @@ impl App {
             || self.picker.is_some()
             || self.confirm_quit_processing
             || self.delete_confirmation.is_some()
+            || self.retranscribe_confirmation.is_some()
+            || self.retranscribe_speakers.is_some()
         {
             return;
         }
@@ -681,6 +757,10 @@ impl App {
             render_settings(frame, settings, centered_rect(58, 78, area));
         } else if self.confirm_quit_processing {
             render_quit_processing_confirmation(frame, centered_rect(54, 28, area));
+        } else if let Some(meeting) = &self.retranscribe_confirmation {
+            render_retranscribe_confirmation(frame, &meeting.name, centered_rect(54, 28, area));
+        } else if let Some(picker) = &self.retranscribe_speakers {
+            render_retranscribe_speaker_picker(frame, picker, centered_rect(46, 38, area));
         } else if let Some(meeting) = &self.delete_confirmation {
             render_delete_confirmation(frame, &meeting.name, centered_rect(54, 28, area));
         }
@@ -806,6 +886,17 @@ impl RecordingDiarization {
         };
     }
 
+    fn previous_expected_speakers(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.expected_speakers = match self.expected_speakers {
+            None => Some(6),
+            Some(1) => None,
+            Some(count) => Some(count - 1),
+        };
+    }
+
     fn label(self) -> &'static str {
         match self.expected_speakers {
             None => "Auto",
@@ -824,13 +915,22 @@ struct CompletedRecording {
     diarization: RecordingDiarization,
 }
 
+struct RetranscribeSpeakerPicker {
+    path: PathBuf,
+    diarization: RecordingDiarization,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AppAction {
     ToggleRecording,
     ToggleMicrophoneMute,
     StopRecording,
     StopRecordingAndQuit,
-    TranscribeMeeting(PathBuf),
+    TranscribeMeeting {
+        path: PathBuf,
+        force: bool,
+        diarization: Option<RecordingDiarization>,
+    },
     OpenMeetingFolder(PathBuf),
     TrashMeetingFolder(PathBuf),
     SaveSettings,
@@ -884,6 +984,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                                         launch_pipeline(
                                             &mut app,
                                             recording.path,
+                                            false,
                                             Some(recording.diarization),
                                             &pipeline_tx,
                                         )
@@ -908,6 +1009,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                                         launch_pipeline(
                                             &mut app,
                                             recording.path,
+                                            false,
                                             Some(recording.diarization),
                                             &pipeline_tx,
                                         )
@@ -923,8 +1025,12 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                                     Err(error) => app.error = Some(format!("{error:#}")),
                                 }
                             }
-                            Some(AppAction::TranscribeMeeting(path)) => {
-                                launch_pipeline(&mut app, path, None, &pipeline_tx);
+                            Some(AppAction::TranscribeMeeting {
+                                path,
+                                force,
+                                diarization,
+                            }) => {
+                                launch_pipeline(&mut app, path, force, diarization, &pipeline_tx);
                             }
                             Some(AppAction::OpenMeetingFolder(path)) => {
                                 if let Err(error) = open_meeting_folder(&path) {
@@ -984,6 +1090,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
 fn launch_pipeline(
     app: &mut App,
     recording_path: PathBuf,
+    force: bool,
     diarization: Option<RecordingDiarization>,
     events: &mpsc::UnboundedSender<PipelineEvent>,
 ) {
@@ -1004,6 +1111,9 @@ fn launch_pipeline(
             .arg(config_path)
             .args(["--output-dir"])
             .arg(output_dir);
+        if force {
+            command.arg("--force");
+        }
         if let Some(diarization) = diarization {
             if diarization.enabled {
                 command.arg("--speakers").arg(
@@ -1289,7 +1399,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("r                Start / stop recording"),
         Line::from("m                Mute / unmute microphone"),
         Line::from("s                Change expected speakers while recording"),
-        Line::from("t                Transcribe selected recording"),
+        Line::from("t                Process / re-transcribe selected recording"),
         Line::from("o                Open selected recording in Finder"),
         Line::from("d / D            Delete with confirmation / immediately"),
         Line::from("?                Toggle help"),
@@ -1445,6 +1555,82 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, meeting_name: &str, area: R
     );
 }
 
+fn render_retranscribe_confirmation(frame: &mut Frame<'_>, meeting_name: &str, area: Rect) {
+    let content = Text::from(vec![
+        Line::styled("Re-transcribe this recording?", theme::warning_text()),
+        Line::from(""),
+        Line::styled(meeting_name, theme::primary_text()),
+        Line::from(""),
+        Line::styled(
+            "The existing transcript will be replaced only when processing succeeds.",
+            theme::secondary_text(),
+        ),
+        Line::from(""),
+        Line::styled(
+            "Enter to continue · Esc or t to cancel",
+            theme::secondary_text(),
+        ),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Re-transcribe")
+        .style(theme::overlay())
+        .padding(Padding::uniform(1));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(block)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn render_retranscribe_speaker_picker(
+    frame: &mut Frame<'_>,
+    picker: &RetranscribeSpeakerPicker,
+    area: Rect,
+) {
+    let options = [
+        "Auto",
+        "1 speaker",
+        "2 speakers",
+        "3 speakers",
+        "4 speakers",
+        "5 speakers",
+        "6 speakers",
+    ];
+    let selected = picker.diarization.label();
+    let mut lines = vec![
+        Line::styled("Expected speakers", theme::primary_text()),
+        Line::from(""),
+    ];
+    lines.extend(options.into_iter().map(|option| {
+        let marker = if option == selected { "› " } else { "  " };
+        Line::styled(
+            format!("{marker}{option}"),
+            if option == selected {
+                theme::primary_text()
+            } else {
+                theme::secondary_text()
+            },
+        )
+    }));
+    lines.extend([
+        Line::from(""),
+        Line::styled(
+            "↑/↓ or 0–6 choose · Enter start · Esc cancel",
+            theme::secondary_text(),
+        ),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Re-transcribe")
+        .style(theme::overlay())
+        .padding(Padding::uniform(1));
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+}
+
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let status = if let Some(active) = &app.recording {
         let elapsed = active.session.elapsed_seconds() as u64;
@@ -1529,6 +1715,8 @@ fn centered_rect(width_percent: u16, height_percent: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
@@ -1813,7 +2001,11 @@ mod tests {
 
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
-            Some(AppAction::TranscribeMeeting(PathBuf::from("/tmp/meeting")))
+            Some(AppAction::TranscribeMeeting {
+                path: PathBuf::from("/tmp/meeting"),
+                force: false,
+                diarization: None,
+            })
         );
 
         app.pipeline_active = true;
@@ -1821,6 +2013,100 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
             None
         );
+    }
+
+    #[test]
+    fn retranscribing_confirms_then_selects_the_expected_speaker_count() {
+        let root = std::env::temp_dir().join(format!(
+            "sosus-retranscribe-test-{}",
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("transcript.md"), "# Transcript\n").unwrap();
+        let mut app = app();
+        let config_path = root.join("config.toml");
+        app.settings_context = Some(SettingsContext {
+            config: Config::default(),
+            fingerprint: config::fingerprint(&config_path).unwrap(),
+            config_path,
+            model_dir: root.join("models"),
+        });
+        app.meetings = vec![Meeting {
+            path: root.clone(),
+            name: "meeting".to_owned(),
+            duration_seconds: None,
+            transcript: Vec::new(),
+        }];
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
+            None
+        );
+        assert!(app.retranscribe_confirmation.is_some());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            app.retranscribe_speakers
+                .as_ref()
+                .and_then(|picker| picker.diarization.expected_speakers),
+            Some(2)
+        );
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppAction::TranscribeMeeting {
+                path: root.clone(),
+                force: true,
+                diarization: Some(RecordingDiarization {
+                    enabled: true,
+                    expected_speakers: Some(3),
+                }),
+            })
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retranscribing_skips_speaker_selection_when_diarization_is_disabled() {
+        let root = std::env::temp_dir().join(format!(
+            "sosus-retranscribe-no-diarization-test-{}",
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("transcript.md"), "# Transcript\n").unwrap();
+        let mut app = app();
+        let mut config = Config::default();
+        config.diarization.enabled = false;
+        let config_path = root.join("config.toml");
+        app.settings_context = Some(SettingsContext {
+            config,
+            fingerprint: config::fingerprint(&config_path).unwrap(),
+            config_path,
+            model_dir: root.join("models"),
+        });
+        app.meetings = vec![Meeting {
+            path: root.clone(),
+            name: "meeting".to_owned(),
+            duration_seconds: None,
+            transcript: Vec::new(),
+        }];
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppAction::TranscribeMeeting {
+                path: root.clone(),
+                force: true,
+                diarization: Some(RecordingDiarization {
+                    enabled: false,
+                    expected_speakers: Some(2),
+                }),
+            })
+        );
+        assert!(app.retranscribe_speakers.is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
