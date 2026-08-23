@@ -227,6 +227,17 @@ struct TranscribeInvocation<'a> {
     resume_transcript: Option<asr::TranscriptResult>,
 }
 
+fn select_artifact_dir(
+    existing_meeting: Option<PathBuf>,
+    app_paths: &paths::AppPaths,
+    started: OffsetDateTime,
+) -> Result<PathBuf, paths::PathError> {
+    match existing_meeting {
+        Some(meeting_dir) => Ok(meeting_dir),
+        None => app_paths.create_meeting_dir(started),
+    }
+}
+
 async fn run_transcribe(
     cli: &Cli,
     invocation_args: TranscribeInvocation<'_>,
@@ -282,7 +293,7 @@ async fn run_transcribe(
     };
     let started = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
     let started_text = started.format(&Rfc3339)?;
-    let artifact_dir = existing_meeting.unwrap_or(app_paths.create_meeting_dir(started)?);
+    let artifact_dir = select_artifact_dir(existing_meeting, &app_paths, started)?;
     let input_fingerprint = file_fingerprint(file)?;
     let mut skipped = vec![pipeline::Stage::Summarize, pipeline::Stage::Index];
     if !effective.effective.diarization.enabled {
@@ -427,8 +438,13 @@ async fn run_transcribe(
             match diarization {
                 Ok(mut diarizer) => match diarizer.process(audio, &ConsoleDiarizationProgress) {
                     Ok(diarization) => {
+                        let assign_words =
+                            matches!(capabilities.word_timestamps, asr::WordTimestamps::Native);
                         let assignment =
-                            diarize::assign_speakers(&mut result, &diarization.turns, false);
+                            diarize::assign_speakers(&mut result, &diarization.turns, assign_words);
+                        if assign_words {
+                            diarize::split_segments_by_speaker(&mut result);
+                        }
                         export::write_transcript_json(&intermediate_path, &result)?;
                         pipeline_state.complete(pipeline::Stage::Diarize, &started_text)?;
                         persist_pipeline(&pipeline_state, &artifact_dir)?;
@@ -771,9 +787,40 @@ fn print_help() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use std::{env, fs};
+    use time::OffsetDateTime;
 
     #[test]
     fn clap_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn resuming_uses_the_existing_meeting_without_creating_another_directory() {
+        let root = env::temp_dir().join(format!(
+            "sosus-cli-test-{}-{}",
+            std::process::id(),
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let output_dir = root.join("recordings");
+        let existing_meeting = root.join("existing-meeting");
+        fs::create_dir_all(&existing_meeting).unwrap();
+        let app_paths = paths::AppPaths::resolve(
+            Some(&root.join("config.toml")),
+            Some(&root.join("data")),
+            Some(&output_dir),
+        )
+        .unwrap();
+
+        let selected = select_artifact_dir(
+            Some(existing_meeting.clone()),
+            &app_paths,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        assert_eq!(selected, existing_meeting);
+        assert!(!output_dir.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

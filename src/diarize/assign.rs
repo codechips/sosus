@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::asr::TranscriptResult;
+use crate::asr::{Segment, TranscriptResult};
 
 const MAX_INHERITED_GAP_SECONDS: f64 = 1.0;
 
@@ -71,6 +71,52 @@ pub fn assign_speakers(
         }
     }
     assignment
+}
+
+/// Splits timestamped ASR segments wherever the assigned speaker changes.
+///
+/// Some ASR backends emit long segments that contain several speakers. A
+/// segment-level label necessarily hides those changes, so callers that have
+/// assigned word labels should normalize the transcript with this function
+/// before exporting it.
+pub fn split_segments_by_speaker(transcript: &mut TranscriptResult) {
+    let original_segments = std::mem::take(&mut transcript.segments);
+    let mut segments = Vec::with_capacity(original_segments.len());
+
+    for segment in original_segments {
+        if segment.words.is_empty() {
+            segments.push(segment);
+            continue;
+        }
+
+        let fallback_speaker = segment.speaker.clone();
+        let mut grouped = Vec::<Segment>::new();
+        for word in segment.words {
+            let speaker = word.speaker.clone().or_else(|| fallback_speaker.clone());
+            if let Some(current) = grouped.last_mut()
+                && current.speaker == speaker
+            {
+                current.end_seconds = word.end_seconds;
+                current.text.push_str(&word.text);
+                current.words.push(word);
+            } else {
+                grouped.push(Segment {
+                    start_seconds: word.start_seconds,
+                    end_seconds: word.end_seconds,
+                    text: word.text.clone(),
+                    words: vec![word],
+                    speaker,
+                });
+            }
+        }
+
+        for segment in &mut grouped {
+            segment.text = segment.text.trim().to_owned();
+        }
+        segments.extend(grouped);
+    }
+
+    transcript.segments = segments;
 }
 
 fn valid_sorted_turns(turns: &[DiarizationTurn]) -> Vec<&DiarizationTurn> {
@@ -335,5 +381,65 @@ mod tests {
             transcript.segments[0].words[1].speaker.as_deref(),
             Some("Speaker 2")
         );
+    }
+
+    #[test]
+    fn splits_one_asr_segment_when_words_change_speaker() {
+        let mut transcript = transcript(&[(0.0, 6.0)]);
+        transcript.segments[0].words = vec![
+            Word {
+                start_seconds: 0.0,
+                end_seconds: 2.0,
+                text: " Hello".to_owned(),
+                score: 0.0,
+                speaker: None,
+            },
+            Word {
+                start_seconds: 2.0,
+                end_seconds: 3.0,
+                text: " there".to_owned(),
+                score: 0.0,
+                speaker: None,
+            },
+            Word {
+                start_seconds: 3.0,
+                end_seconds: 5.0,
+                text: " Hi".to_owned(),
+                score: 0.0,
+                speaker: None,
+            },
+            Word {
+                start_seconds: 5.0,
+                end_seconds: 6.0,
+                text: " back".to_owned(),
+                score: 0.0,
+                speaker: None,
+            },
+        ];
+        let turns = vec![
+            DiarizationTurn {
+                start_seconds: 0.0,
+                end_seconds: 3.0,
+                cluster_id: 10,
+            },
+            DiarizationTurn {
+                start_seconds: 3.0,
+                end_seconds: 6.0,
+                cluster_id: 20,
+            },
+        ];
+
+        assign_speakers(&mut transcript, &turns, true);
+        split_segments_by_speaker(&mut transcript);
+
+        assert_eq!(transcript.segments.len(), 2);
+        assert_eq!(transcript.segments[0].speaker.as_deref(), Some("Speaker 1"));
+        assert_eq!(transcript.segments[0].text, "Hello there");
+        assert_eq!(transcript.segments[0].start_seconds, 0.0);
+        assert_eq!(transcript.segments[0].end_seconds, 3.0);
+        assert_eq!(transcript.segments[1].speaker.as_deref(), Some("Speaker 2"));
+        assert_eq!(transcript.segments[1].text, "Hi back");
+        assert_eq!(transcript.segments[1].start_seconds, 3.0);
+        assert_eq!(transcript.segments[1].end_seconds, 6.0);
     }
 }
