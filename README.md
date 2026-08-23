@@ -44,6 +44,14 @@ Transcribe an existing recording, explicitly using Whisper for Swedish:
 sosus transcribe ~/Downloads/meeting.m4a --backend whisper --language sv
 ```
 
+Diarization assumes two speakers by default. Override that for one invocation
+when you know the expected count, or ask it to estimate:
+
+```sh
+sosus transcribe ~/Downloads/meeting.m4a --speakers 3
+sosus transcribe ~/Downloads/meeting.m4a --speakers auto
+```
+
 Import an existing file into the meeting archive, or resume a meeting whose processing was interrupted:
 
 ```sh

@@ -14,13 +14,26 @@ enum Field {
     MicrophoneLevel,
     Language,
     Diarization,
+    ExpectedSpeakers,
     Engine,
     Model,
     JsonExport,
 }
 
 impl Field {
-    const ALL: [Self; 8] = [
+    const WITH_DIARIZATION: [Self; 9] = [
+        Self::Microphone,
+        Self::SystemLevel,
+        Self::MicrophoneLevel,
+        Self::Language,
+        Self::Diarization,
+        Self::ExpectedSpeakers,
+        Self::Engine,
+        Self::Model,
+        Self::JsonExport,
+    ];
+
+    const WITHOUT_DIARIZATION: [Self; 8] = [
         Self::Microphone,
         Self::SystemLevel,
         Self::MicrophoneLevel,
@@ -31,13 +44,19 @@ impl Field {
         Self::JsonExport,
     ];
 
-    fn next(self, reverse: bool) -> Self {
-        let index = Self::ALL
-            .iter()
-            .position(|field| *field == self)
-            .unwrap_or(0);
-        let len = Self::ALL.len();
-        Self::ALL[(index + if reverse { len - 1 } else { 1 }) % len]
+    fn available(diarization_enabled: bool) -> &'static [Self] {
+        if diarization_enabled {
+            &Self::WITH_DIARIZATION
+        } else {
+            &Self::WITHOUT_DIARIZATION
+        }
+    }
+
+    fn next(self, reverse: bool, diarization_enabled: bool) -> Self {
+        let fields = Self::available(diarization_enabled);
+        let index = fields.iter().position(|field| *field == self).unwrap_or(0);
+        let len = fields.len();
+        fields[(index + if reverse { len - 1 } else { 1 }) % len]
     }
 }
 
@@ -78,11 +97,11 @@ impl SettingsModal {
                 _ => SettingsAction::Save,
             },
             KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = self.selected.next(true);
+                self.selected = self.selected.next(true, self.draft.diarization.enabled);
                 SettingsAction::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = self.selected.next(false);
+                self.selected = self.selected.next(false, self.draft.diarization.enabled);
                 SettingsAction::None
             }
             KeyCode::Left | KeyCode::Char('h') => {
@@ -164,6 +183,9 @@ impl SettingsModal {
                 );
             }
             Field::Diarization => self.draft.diarization.enabled = !self.draft.diarization.enabled,
+            Field::ExpectedSpeakers => {
+                cycle_expected_speakers(&mut self.draft.diarization, reverse)
+            }
             Field::Engine => {
                 self.draft.transcription.backend = match self.draft.transcription.backend {
                     TranscriptionBackend::Parakeet => TranscriptionBackend::Whisper,
@@ -199,7 +221,7 @@ impl SettingsModal {
     }
 
     pub fn rows(&self) -> Vec<(&'static str, String, bool)> {
-        Field::ALL
+        Field::available(self.draft.diarization.enabled)
             .iter()
             .map(|field| {
                 let value = match field {
@@ -208,6 +230,7 @@ impl SettingsModal {
                     Field::MicrophoneLevel => gain(self.draft.audio.mic_gain_db),
                     Field::Language => language(&self.draft.transcription.language).to_owned(),
                     Field::Diarization => on_off(self.draft.diarization.enabled).to_owned(),
+                    Field::ExpectedSpeakers => expected_speakers(&self.draft.diarization),
                     Field::Engine => match self.draft.transcription.backend {
                         TranscriptionBackend::Parakeet => "Parakeet".to_owned(),
                         TranscriptionBackend::Whisper => "Whisper".to_owned(),
@@ -226,6 +249,7 @@ impl SettingsModal {
                     Field::MicrophoneLevel => "Mic level",
                     Field::Language => "Language",
                     Field::Diarization => "Diarization",
+                    Field::ExpectedSpeakers => "Expected speakers",
                     Field::Engine => "Engine",
                     Field::Model => "Model",
                     Field::JsonExport => "JSON export",
@@ -293,6 +317,30 @@ fn on_off(enabled: bool) -> &'static str {
 
 fn gain(value: f64) -> String {
     format!("{value:+.0} dB")
+}
+
+fn expected_speakers(config: &crate::config::DiarizationConfig) -> String {
+    if config.min_speakers > 0 && config.min_speakers == config.max_speakers {
+        config.min_speakers.to_string()
+    } else {
+        "Auto".to_owned()
+    }
+}
+
+fn cycle_expected_speakers(config: &mut crate::config::DiarizationConfig, reverse: bool) {
+    const OPTIONS: [usize; 7] = [0, 1, 2, 3, 4, 5, 6];
+    let current = if config.min_speakers > 0 && config.min_speakers == config.max_speakers {
+        config.min_speakers
+    } else {
+        0
+    };
+    let index = OPTIONS
+        .iter()
+        .position(|count| *count == current)
+        .unwrap_or(0);
+    let next = OPTIONS[(index + if reverse { OPTIONS.len() - 1 } else { 1 }) % OPTIONS.len()];
+    config.min_speakers = next;
+    config.max_speakers = next;
 }
 
 fn language(value: &str) -> String {
@@ -442,7 +490,7 @@ mod tests {
     #[test]
     fn selecting_a_model_switches_from_parakeet_to_whisper() {
         let mut settings = SettingsModal::new(Config::default());
-        for _ in 0..6 {
+        for _ in 0..7 {
             settings.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         settings.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
@@ -451,5 +499,33 @@ mod tests {
             TranscriptionBackend::Whisper
         );
         assert_eq!(settings.config().transcription.model, "whisper-tiny");
+    }
+
+    #[test]
+    fn expected_speakers_cycles_and_is_hidden_when_diarization_is_off() {
+        let mut settings = SettingsModal::new(Config::default());
+        assert!(
+            settings
+                .rows()
+                .iter()
+                .any(|(label, value, _)| *label == "Expected speakers" && value == "2")
+        );
+
+        for _ in 0..5 {
+            settings.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        settings.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(settings.config().diarization.min_speakers, 3);
+        assert_eq!(settings.config().diarization.max_speakers, 3);
+
+        settings.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        settings.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!settings.config().diarization.enabled);
+        assert!(
+            !settings
+                .rows()
+                .iter()
+                .any(|(label, _, _)| *label == "Expected speakers")
+        );
     }
 }

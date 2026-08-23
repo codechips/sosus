@@ -57,7 +57,7 @@ Language selection uses human-readable names plus ISO codes. Auto-detection rema
 
 ## Diarization
 
-Diarization is optional. It assigns deterministic labels by first appearance (`Speaker 1`, `Speaker 2`, and so on). Whisper diarization operates on segment timestamps; Parakeet may use native word timings where available.
+Diarization is optional. It defaults to an expected count of two speakers and assigns deterministic labels by first appearance (`Speaker 1`, `Speaker 2`, and so on). The expected count can be changed to `Auto` or another exact value in settings and with `sosus transcribe --speakers auto|N`. Whisper diarization operates on segment timestamps; Parakeet may use native word timings where available.
 
 ## TUI and settings
 

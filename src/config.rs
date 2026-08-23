@@ -263,8 +263,8 @@ impl Default for DiarizationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            min_speakers: 0,
-            max_speakers: 0,
+            min_speakers: 2,
+            max_speakers: 2,
         }
     }
 }
@@ -632,6 +632,8 @@ pub fn save_tui_settings(
 
     let diarization = table_mut(&mut document, "diarization");
     diarization["enabled"] = value(config.diarization.enabled);
+    diarization["min_speakers"] = value(config.diarization.min_speakers as i64);
+    diarization["max_speakers"] = value(config.diarization.max_speakers as i64);
     let output = table_mut(&mut document, "output");
     output["json"] = value(config.output.json);
 
@@ -935,6 +937,8 @@ mod tests {
         assert!(contents.contains("answer = 42"));
         assert!(contents.contains("mic = false"));
         assert!(contents.contains("json = true"));
+        assert!(contents.contains("min_speakers = 2"));
+        assert!(contents.contains("max_speakers = 2"));
 
         fs::write(&path, "[audio]\nmic = true\n").unwrap();
         assert!(matches!(

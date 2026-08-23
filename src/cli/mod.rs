@@ -3,6 +3,7 @@
 use std::{
     io::{self, IsTerminal},
     path::{Path, PathBuf},
+    str::FromStr,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -36,6 +37,38 @@ struct Cli {
     command: Option<Command>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExpectedSpeakerCount {
+    Auto,
+    Exact(usize),
+}
+
+impl ExpectedSpeakerCount {
+    fn bounds(self) -> (usize, usize) {
+        match self {
+            Self::Auto => (0, 0),
+            Self::Exact(count) => (count, count),
+        }
+    }
+}
+
+impl FromStr for ExpectedSpeakerCount {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("auto") {
+            return Ok(Self::Auto);
+        }
+        let count = value
+            .parse::<usize>()
+            .map_err(|_| "expected `auto` or a positive number".to_owned())?;
+        if count == 0 {
+            return Err("expected `auto` or a positive number".to_owned());
+        }
+        Ok(Self::Exact(count))
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Launch the interactive terminal interface.
@@ -58,6 +91,9 @@ enum Command {
         /// Skip speaker diarization for this invocation.
         #[arg(long)]
         no_diarize: bool,
+        /// Expected speaker count: `auto` or an exact positive number.
+        #[arg(long, value_name = "auto|N", conflicts_with_all = ["min_speakers", "max_speakers"])]
+        speakers: Option<ExpectedSpeakerCount>,
         /// Require at least this many speakers (zero = auto).
         #[arg(long, value_name = "N")]
         min_speakers: Option<usize>,
@@ -89,9 +125,17 @@ pub async fn run() -> anyhow::Result<()> {
             ref language,
             threads,
             no_diarize,
+            speakers,
             min_speakers,
             max_speakers,
         }) => {
+            let (min_speakers, max_speakers) = match speakers {
+                Some(expected) => {
+                    let (min, max) = expected.bounds();
+                    (Some(min), Some(max))
+                }
+                None => (min_speakers, max_speakers),
+            };
             run_transcribe(
                 &cli,
                 TranscribeInvocation {
@@ -786,13 +830,33 @@ fn print_help() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use std::{env, fs};
     use time::OffsetDateTime;
 
     #[test]
     fn clap_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn expected_speakers_accepts_auto_or_an_exact_count() {
+        assert_eq!("auto".parse(), Ok(ExpectedSpeakerCount::Auto));
+        assert_eq!("2".parse(), Ok(ExpectedSpeakerCount::Exact(2)));
+        assert!("0".parse::<ExpectedSpeakerCount>().is_err());
+        assert!("two".parse::<ExpectedSpeakerCount>().is_err());
+        assert!(
+            Cli::try_parse_from([
+                "sosus",
+                "transcribe",
+                "meeting.wav",
+                "--speakers",
+                "2",
+                "--min-speakers",
+                "2",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
