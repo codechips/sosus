@@ -27,6 +27,7 @@ description = "Run the model-free CI quality gates locally"
 run = """
 cargo fmt --all -- --check
 scripts/check-repository-assets.sh
+scripts/changelog-check.sh
 cargo fetch --locked --target aarch64-apple-darwin
 CARGO_NET_OFFLINE=true cargo clippy --locked --all-targets --no-default-features -- -D warnings
 CARGO_NET_OFFLINE=true /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' cargo test --locked --all-targets --no-default-features
@@ -35,6 +36,18 @@ CARGO_NET_OFFLINE=true /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny
 [tasks.release-version]
 description = "Validate and display the calendar release version, tag, and archive name"
 run = "bash scripts/release-version.sh"
+
+[tasks.changelog-draft]
+description = "List commits since the previous tag as changelog candidates"
+run = "bash scripts/changelog-draft.sh"
+
+[tasks.changelog-check]
+description = "Validate changelog structure; use --require-unreleased before a release"
+run = "bash scripts/changelog-check.sh"
+
+[tasks.changelog-release]
+description = "Promote Unreleased notes into the current Cargo version heading"
+run = "bash scripts/changelog-release.sh"
 
 [tasks.release-preflight]
 description = "Check local Developer ID and notary profile references"

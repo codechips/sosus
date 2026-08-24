@@ -21,6 +21,18 @@ bd prime                # Refresh Beads context
 - Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context automatically through native hooks; use `/hooks` to inspect or toggle them.
 - Keep persistent project memory in Beads via `bd remember`; do not create ad hoc memory files.
 
+## Changelog
+
+For every user-visible change, add one concise entry under `CHANGELOG.md` →
+`Unreleased` in the same change. Do not list internal refactors, test-only
+changes, or dependency maintenance.
+
+Before creating a release, run `mise run changelog-release` after the Cargo
+version bump and before tagging. It promotes `Unreleased` into the dated
+calendar-version heading and refuses to run when no meaningful release notes
+exist. Use `mise run changelog-draft` only to discover candidate commits; the
+changelog itself remains human-written.
+
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->
 
