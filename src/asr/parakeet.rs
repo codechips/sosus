@@ -21,8 +21,9 @@ const ENCODER: &str = "encoder.int8.onnx";
 const DECODER: &str = "decoder.int8.onnx";
 const JOINER: &str = "joiner.int8.onnx";
 const TOKENS: &str = "tokens.txt";
-/// Keep native decoder input bounded. Long single streams can abort inside sherpa-onnx.
-const MAX_CHUNK_SECONDS: usize = 10 * 60;
+/// This export has a fixed 2,500-frame attention shape. Keep well below its roughly
+/// 200-second ceiling: oversized input causes ONNX Runtime to abort rather than return an error.
+const MAX_CHUNK_SECONDS: usize = 120;
 const MAX_CHUNK_SAMPLES: usize = MAX_CHUNK_SECONDS * Audio16kMono::SAMPLE_RATE as usize;
 
 pub struct ParakeetTranscriber {
@@ -341,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn bounds_long_audio_into_contiguous_ten_minute_chunks() {
+    fn bounds_long_audio_into_contiguous_two_minute_chunks() {
         let samples = MAX_CHUNK_SAMPLES * 2 + 7;
         assert_eq!(
             chunk_ranges(samples),
