@@ -39,7 +39,7 @@ The archive is the source of truth. A meeting folder is collision-safe and priva
 
 ```
 <recordings>/<YYYY-MM-DD_HHMM[_N]>/
-  recording.wav
+  recording.wav (or recording.m4a when optional archive compaction is enabled)
   transcript.md
   transcript.json        # only when JSON export is enabled
   .pipeline-state.json   # resumability metadata

@@ -12,7 +12,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::time::{Duration, MissedTickBehavior};
 
-use crate::{asr, audio, config, diarize, export, logging, models, paths, pipeline};
+use crate::{archive, asr, audio, config, diarize, export, logging, models, paths, pipeline};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -237,7 +237,9 @@ async fn run_resume(
     )?;
     app_paths.ensure_base_directories()?;
     let audio_path = if meeting.is_dir() {
-        meeting.join("recording.wav")
+        archive::recording_path(meeting).ok_or_else(|| {
+            anyhow::anyhow!("recording file was not found in {}", meeting.display())
+        })?
     } else {
         meeting.to_path_buf()
     };
@@ -554,6 +556,7 @@ async fn run_transcribe(
         .stage(pipeline::Stage::Export)
         .is_some_and(|stage| stage.status == pipeline::StageStatus::Completed)
     {
+        compact_completed_recording(&effective.effective.output, file, &artifact_dir);
         eprintln!("Transcript artifacts are already complete.");
         return Ok(());
     }
@@ -595,8 +598,21 @@ async fn run_transcribe(
     }
     pipeline_state.complete(pipeline::Stage::Export, &started_text)?;
     persist_pipeline(&pipeline_state, &artifact_dir)?;
+    compact_completed_recording(&effective.effective.output, file, &artifact_dir);
 
     Ok(())
+}
+
+fn compact_completed_recording(output: &config::OutputConfig, file: &Path, artifact_dir: &Path) {
+    if !output.compact_m4a || file != artifact_dir.join("recording.wav") {
+        return;
+    }
+    match audio::compact_wav_to_m4a(file) {
+        Ok(path) => eprintln!("Compacted recording: {}", path.display()),
+        Err(error) => {
+            eprintln!("warning: could not compact recording to M4A; keeping WAV: {error}")
+        }
+    }
 }
 
 const INTERMEDIATE_TRANSCRIPT: &str = ".transcript-work.json";

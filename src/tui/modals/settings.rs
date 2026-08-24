@@ -18,10 +18,11 @@ enum Field {
     Engine,
     Model,
     JsonExport,
+    CompactM4a,
 }
 
 impl Field {
-    const WITH_DIARIZATION: [Self; 9] = [
+    const WITH_DIARIZATION: [Self; 10] = [
         Self::Microphone,
         Self::SystemLevel,
         Self::MicrophoneLevel,
@@ -31,9 +32,10 @@ impl Field {
         Self::Engine,
         Self::Model,
         Self::JsonExport,
+        Self::CompactM4a,
     ];
 
-    const WITHOUT_DIARIZATION: [Self; 8] = [
+    const WITHOUT_DIARIZATION: [Self; 9] = [
         Self::Microphone,
         Self::SystemLevel,
         Self::MicrophoneLevel,
@@ -42,6 +44,7 @@ impl Field {
         Self::Engine,
         Self::Model,
         Self::JsonExport,
+        Self::CompactM4a,
     ];
 
     fn available(diarization_enabled: bool) -> &'static [Self] {
@@ -217,6 +220,7 @@ impl SettingsModal {
                 }
             }
             Field::JsonExport => self.draft.output.json = !self.draft.output.json,
+            Field::CompactM4a => self.draft.output.compact_m4a = !self.draft.output.compact_m4a,
         }
     }
 
@@ -242,6 +246,7 @@ impl SettingsModal {
                     }
                     Field::Model => model_label(&self.draft.transcription.model).to_owned(),
                     Field::JsonExport => on_off(self.draft.output.json).to_owned(),
+                    Field::CompactM4a => on_off(self.draft.output.compact_m4a).to_owned(),
                 };
                 let label = match field {
                     Field::Microphone => "Microphone",
@@ -253,6 +258,7 @@ impl SettingsModal {
                     Field::Engine => "Engine",
                     Field::Model => "Model",
                     Field::JsonExport => "JSON export",
+                    Field::CompactM4a => "Compact audio to M4A",
                 };
                 (label, value, *field == self.selected)
             })
@@ -527,5 +533,21 @@ mod tests {
                 .iter()
                 .any(|(label, _, _)| *label == "Expected speakers")
         );
+    }
+
+    #[test]
+    fn compact_m4a_is_a_visible_opt_in_setting() {
+        let mut settings = SettingsModal::new(Config::default());
+        assert!(
+            settings
+                .rows()
+                .iter()
+                .any(|(label, value, _)| { *label == "Compact audio to M4A" && value == "Off" })
+        );
+        while settings.selected != Field::CompactM4a {
+            settings.selected = settings.selected.next(false, true);
+        }
+        settings.adjust(false);
+        assert!(settings.config().output.compact_m4a);
     }
 }

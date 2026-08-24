@@ -69,6 +69,11 @@ models, and redacted logs use the platform data directories; `--output-dir`,
 transcription, and diarization run locally. Model downloads occur only when a
 selected model is not already present.
 
+Owned recordings start as resilient PCM WAV files. In Settings, **Compact audio
+to M4A** optionally converts a recording to a compact AAC/M4A file after its
+transcript has been saved successfully; the original WAV remains if conversion
+fails. Both formats can be transcribed again.
+
 ## Development
 
 ```sh

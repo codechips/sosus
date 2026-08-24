@@ -310,6 +310,7 @@ impl Default for SearchConfig {
 pub struct OutputConfig {
     pub dir: PathBuf,
     pub json: bool,
+    pub compact_m4a: bool,
     pub keep_recording: bool,
 }
 
@@ -318,6 +319,7 @@ impl Default for OutputConfig {
         Self {
             dir: PathBuf::from("~/sosus/recordings"),
             json: false,
+            compact_m4a: false,
             keep_recording: true,
         }
     }
@@ -449,6 +451,7 @@ pub struct ConfigOverrides {
     pub summary_template: Option<String>,
     pub llm_model: Option<String>,
     pub output_json: Option<bool>,
+    pub compact_m4a: Option<bool>,
     pub keep_recording: Option<bool>,
 }
 
@@ -527,6 +530,9 @@ impl ConfigOverrides {
         }
         if let Some(value) = self.output_json {
             candidate.output.json = value;
+        }
+        if let Some(value) = self.compact_m4a {
+            candidate.output.compact_m4a = value;
         }
         if let Some(value) = self.keep_recording {
             candidate.output.keep_recording = value;
@@ -636,6 +642,7 @@ pub fn save_tui_settings(
     diarization["max_speakers"] = value(config.diarization.max_speakers as i64);
     let output = table_mut(&mut document, "output");
     output["json"] = value(config.output.json);
+    output["compact_m4a"] = value(config.output.compact_m4a);
 
     write_private_atomic(path, document.to_string().as_bytes())?;
     fingerprint(path)

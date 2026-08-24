@@ -5,6 +5,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use symphonia::core::{
+    formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
+};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Meeting {
     pub path: PathBuf,
@@ -25,7 +29,7 @@ pub fn discover(root: &Path) -> io::Result<Vec<Meeting>> {
     let mut meetings = fs::read_dir(root)?
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter(|entry| entry.path().join("recording.wav").is_file())
+        .filter(|entry| recording_path(&entry.path()).is_some())
         .filter_map(|entry| load_meeting(entry.path()).ok())
         .collect::<Vec<_>>();
     meetings.sort_by(|left, right| right.name.cmp(&left.name));
@@ -38,7 +42,8 @@ fn load_meeting(path: PathBuf) -> io::Result<Meeting> {
         .and_then(|value| value.to_str())
         .unwrap_or("meeting")
         .to_owned();
-    let recording = path.join("recording.wav");
+    let recording =
+        recording_path(&path).expect("recording existence was checked during discovery");
     Ok(Meeting {
         path,
         name,
@@ -57,10 +62,40 @@ pub fn load_transcript(meeting: &Meeting) -> io::Result<Vec<Segment>> {
     parse_transcript(&fs::read_to_string(path)?)
 }
 
+pub fn recording_path(meeting_dir: &Path) -> Option<PathBuf> {
+    ["recording.wav", "recording.m4a"]
+        .into_iter()
+        .map(|name| meeting_dir.join(name))
+        .find(|path| path.is_file())
+}
+
 fn recording_duration_seconds(path: &Path) -> Option<f64> {
-    let reader = hound::WavReader::open(path).ok()?;
-    let sample_rate = reader.spec().sample_rate;
-    (sample_rate > 0).then(|| reader.duration() as f64 / f64::from(sample_rate))
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("wav"))
+    {
+        let reader = hound::WavReader::open(path).ok()?;
+        let sample_rate = reader.spec().sample_rate;
+        return (sample_rate > 0).then(|| reader.duration() as f64 / f64::from(sample_rate));
+    }
+    let source = MediaSourceStream::new(Box::new(fs::File::open(path).ok()?), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension(path.extension()?.to_str()?);
+    let format = symphonia::default::get_probe()
+        .format(
+            &hint,
+            source,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .ok()?
+        .format;
+    let track = format.default_track()?;
+    let time = track
+        .codec_params
+        .time_base?
+        .calc_time(track.codec_params.n_frames?);
+    Some(time.seconds as f64 + time.frac)
 }
 
 fn parse_transcript(markdown: &str) -> io::Result<Vec<Segment>> {
@@ -150,6 +185,27 @@ mod tests {
 
         assert_eq!(meetings.len(), 1);
         assert_eq!(meetings[0].name, "complete");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_compacted_m4a_recordings() {
+        let root = env::temp_dir().join(format!(
+            "sosus-archive-m4a-test-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let meeting = root.join("meeting");
+        fs::create_dir_all(&meeting).unwrap();
+        fs::write(meeting.join("recording.m4a"), b"placeholder").unwrap();
+
+        let meetings = discover(&root).unwrap();
+
+        assert_eq!(meetings.len(), 1);
+        assert_eq!(
+            recording_path(&meetings[0].path),
+            Some(meeting.join("recording.m4a"))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
