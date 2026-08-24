@@ -7,7 +7,8 @@ mod widgets;
 
 use std::{
     collections::VecDeque,
-    io::{self, Stdout},
+    env,
+    io::{self, Stdout, Write as _},
     panic,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -897,6 +898,22 @@ impl App {
         }
         render_status_bar(frame, area, self);
     }
+
+    fn terminal_activity(&self) -> Option<&'static str> {
+        if self.recording.is_some() {
+            Some("Recording")
+        } else if self.reconnecting.is_some() {
+            Some("Reconnecting")
+        } else if self.pipeline_active {
+            match self.pipeline_status.as_deref() {
+                Some("Transcribing") => Some("Transcribing"),
+                Some("Diarizing") => Some("Diarizing"),
+                _ => Some("Processing"),
+            }
+        } else {
+            None
+        }
+    }
 }
 
 fn choose_custom_model() -> anyhow::Result<PathBuf> {
@@ -1100,17 +1117,19 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
 async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Result<()> {
     let mut app = App::new(startup);
     app.refresh_archive();
+    let mut terminal_title = TerminalTitle::new();
     let mut input = InputThread::spawn().context("start terminal input reader")?;
     let mut pipeline = pipeline::Worker::spawn().context("start pipeline worker")?;
     let (pipeline_tx, mut pipeline_rx) = mpsc::unbounded_channel();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
 
     while !app.should_quit {
+        terminal_title.update(app.terminal_activity(), app.processing_spinner_frame);
         terminal.draw(|frame| app.render(frame))?;
 
         tokio::select! {
             _ = tick.tick() => {
-                if app.pipeline_active || app.reconnecting.is_some() {
+                if app.recording.is_some() || app.pipeline_active || app.reconnecting.is_some() {
                     app.processing_spinner_frame =
                         (app.processing_spinner_frame + 1) % PROCESSING_DOTS.len();
                 }
@@ -1442,6 +1461,65 @@ impl Drop for TerminalGuard {
             let _ = restore_active_terminal();
         }
     }
+}
+
+/// Keeps terminal-window activity visible without adding noise to the TUI.
+///
+/// OSC title updates are harmlessly ignored by terminals that do not support
+/// them. For unknown terminals we deliberately use a static activity title
+/// rather than sending rapid animation updates.
+struct TerminalTitle {
+    animated: bool,
+    current: String,
+}
+
+impl TerminalTitle {
+    fn new() -> Self {
+        Self {
+            animated: terminal_supports_title_animation(env::var("TERM_PROGRAM").ok().as_deref()),
+            current: String::new(),
+        }
+    }
+
+    fn update(&mut self, activity: Option<&str>, frame: usize) {
+        let title = terminal_title(activity, frame, self.animated);
+        if title != self.current {
+            let _ = write_terminal_title(&title);
+            self.current = title;
+        }
+    }
+}
+
+impl Drop for TerminalTitle {
+    fn drop(&mut self) {
+        let _ = write_terminal_title("SOSUS");
+    }
+}
+
+fn terminal_supports_title_animation(term_program: Option<&str>) -> bool {
+    matches!(
+        term_program.map(str::to_ascii_lowercase).as_deref(),
+        Some("iterm.app" | "ghostty" | "wezterm" | "apple_terminal")
+    )
+}
+
+fn terminal_title(activity: Option<&str>, frame: usize, animated: bool) -> String {
+    match activity {
+        Some(activity) if animated => {
+            format!(
+                "{} SOSUS — {activity}",
+                PROCESSING_DOTS[frame % PROCESSING_DOTS.len()]
+            )
+        }
+        Some(activity) => format!("SOSUS — {activity}"),
+        None => "SOSUS".to_owned(),
+    }
+}
+
+fn write_terminal_title(title: &str) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "\x1b]2;{title}\x07")?;
+    stdout.flush()
 }
 
 fn restore_active_terminal() -> io::Result<()> {
@@ -2380,6 +2458,21 @@ mod tests {
         app.handle_pipeline_event(PipelineEvent::WorkCompleted);
         assert!(!app.pipeline_active);
         assert!(app.pipeline_status.is_none());
+    }
+
+    #[test]
+    fn terminal_title_uses_braille_only_for_known_animated_terminals() {
+        assert!(terminal_supports_title_animation(Some("ghostty")));
+        assert!(!terminal_supports_title_animation(Some("xterm")));
+        assert_eq!(
+            terminal_title(Some("Transcribing"), 0, true),
+            "⠋ SOSUS — Transcribing"
+        );
+        assert_eq!(
+            terminal_title(Some("Transcribing"), 0, false),
+            "SOSUS — Transcribing"
+        );
+        assert_eq!(terminal_title(None, 0, true), "SOSUS");
     }
 
     #[test]
