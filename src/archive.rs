@@ -63,10 +63,19 @@ pub fn load_transcript(meeting: &Meeting) -> io::Result<Vec<Segment>> {
 }
 
 pub fn recording_path(meeting_dir: &Path) -> Option<PathBuf> {
-    ["recording.wav", "recording.m4a"]
-        .into_iter()
-        .map(|name| meeting_dir.join(name))
-        .find(|path| path.is_file())
+    [
+        "recording.wav",
+        "recording.m4a",
+        "recording.mp3",
+        "recording.flac",
+        "recording.ogg",
+        "recording.mp4",
+        "recording.m4v",
+        "recording.mov",
+    ]
+    .into_iter()
+    .map(|name| meeting_dir.join(name))
+    .find(|path| path.is_file())
 }
 
 fn recording_duration_seconds(path: &Path) -> Option<f64> {
@@ -205,6 +214,24 @@ mod tests {
         assert_eq!(
             recording_path(&meetings[0].path),
             Some(meeting.join("recording.m4a"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_imported_media_recordings() {
+        let root = env::temp_dir().join(format!(
+            "sosus-archive-imported-test-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let meeting = root.join("meeting");
+        fs::create_dir_all(&meeting).unwrap();
+        fs::write(meeting.join("recording.mp4"), b"placeholder").unwrap();
+
+        assert_eq!(
+            recording_path(&meeting),
+            Some(meeting.join("recording.mp4"))
         );
         fs::remove_dir_all(root).unwrap();
     }

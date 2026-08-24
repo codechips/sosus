@@ -61,6 +61,9 @@ sosus import ~/Downloads/meeting.m4a
 sosus resume ~/sosus/recordings/2026-08-22_1430
 ```
 
+`import` copies the source into its new meeting folder before transcription, so
+the archive remains resumable after the original file is moved or deleted.
+
 ## Storage and privacy
 
 By default, recordings live in `~/sosus/recordings`. Configuration, downloaded

@@ -1,7 +1,9 @@
 //! Non-interactive command dispatch.
 
 use std::{
+    fs,
     io::{self, IsTerminal},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     str::FromStr,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -164,6 +166,7 @@ pub async fn run() -> anyhow::Result<()> {
                     existing_meeting: None,
                     resume_state: None,
                     resume_transcript: None,
+                    copy_into_archive: false,
                 },
             )
             .await
@@ -199,6 +202,7 @@ pub async fn run() -> anyhow::Result<()> {
                     existing_meeting: None,
                     resume_state: None,
                     resume_transcript: None,
+                    copy_into_archive: true,
                 },
             )
             .await
@@ -293,6 +297,7 @@ async fn run_resume(
             existing_meeting: Some(meeting_dir),
             resume_state,
             resume_transcript,
+            copy_into_archive: false,
         },
     )
     .await
@@ -309,6 +314,7 @@ struct TranscribeInvocation<'a> {
     existing_meeting: Option<PathBuf>,
     resume_state: Option<pipeline::PipelineState>,
     resume_transcript: Option<asr::TranscriptResult>,
+    copy_into_archive: bool,
 }
 
 fn select_artifact_dir(
@@ -320,6 +326,33 @@ fn select_artifact_dir(
         Some(meeting_dir) => Ok(meeting_dir),
         None => app_paths.create_meeting_dir(started),
     }
+}
+
+fn copy_imported_file(source: &Path, meeting_dir: &Path) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(
+        source.is_file(),
+        "import file was not found: {}",
+        source.display()
+    );
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|value| asr::SUPPORTED_EXTENSIONS.contains(&value.as_str()))
+        .context("unsupported import file type")?;
+    let destination = meeting_dir.join(format!("recording.{extension}"));
+    anyhow::ensure!(!destination.exists(), "import destination already exists");
+    let temporary = meeting_dir.join(format!(".recording.{extension}.partial"));
+    if let Err(error) = fs::copy(source, &temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("copy {}", source.display()));
+    }
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("secure imported recording {}", temporary.display()))?;
+    fs::rename(&temporary, &destination)
+        .with_context(|| format!("finalize {}", destination.display()))?;
+    eprintln!("Imported recording: {}", destination.display());
+    Ok(destination)
 }
 
 async fn run_transcribe(
@@ -337,6 +370,7 @@ async fn run_transcribe(
         existing_meeting,
         resume_state,
         resume_transcript,
+        copy_into_archive,
     } = invocation_args;
     let invocation = config::ConfigOverrides {
         config_path: cli.config.clone(),
@@ -378,6 +412,12 @@ async fn run_transcribe(
     let started = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
     let started_text = started.format(&Rfc3339)?;
     let artifact_dir = select_artifact_dir(existing_meeting, &app_paths, started)?;
+    let owned_file = if copy_into_archive {
+        copy_imported_file(file, &artifact_dir)?
+    } else {
+        file.to_path_buf()
+    };
+    let file = owned_file.as_path();
     let input_fingerprint = file_fingerprint(file)?;
     let mut skipped = vec![pipeline::Stage::Summarize, pipeline::Stage::Index];
     if !effective.effective.diarization.enabled {
@@ -789,6 +829,7 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
             ),
             resume_state: None,
             resume_transcript: None,
+            copy_into_archive: false,
         },
     )
     .await
@@ -967,6 +1008,31 @@ mod tests {
 
         assert_eq!(selected, existing_meeting);
         assert!(!output_dir.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn import_copies_an_owned_private_recording() {
+        let root = env::temp_dir().join(format!(
+            "sosus-import-test-{}-{}",
+            std::process::id(),
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let source = root.join("Downloads/meeting.mp3");
+        let meeting = root.join("recordings/meeting");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(&meeting).unwrap();
+        fs::write(&source, b"original audio").unwrap();
+
+        let imported = copy_imported_file(&source, &meeting).unwrap();
+
+        assert_eq!(imported, meeting.join("recording.mp3"));
+        assert_eq!(fs::read(&source).unwrap(), b"original audio");
+        assert_eq!(fs::read(&imported).unwrap(), b"original audio");
+        assert_eq!(
+            fs::metadata(&imported).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
