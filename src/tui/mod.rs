@@ -1124,7 +1124,10 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
     let mut tick = tokio::time::interval(Duration::from_millis(100));
 
     while !app.should_quit {
-        terminal_title.update(app.terminal_activity(), app.processing_spinner_frame);
+        terminal_title.update(
+            app.terminal_activity().is_some(),
+            app.processing_spinner_frame,
+        );
         terminal.draw(|frame| app.render(frame))?;
 
         tokio::select! {
@@ -1466,7 +1469,7 @@ impl Drop for TerminalGuard {
 /// Keeps terminal-window activity visible without adding noise to the TUI.
 ///
 /// OSC title updates are harmlessly ignored by terminals that do not support
-/// them. For unknown terminals we deliberately use a static activity title
+/// them. For unknown terminals we deliberately use a static active title
 /// rather than sending rapid animation updates.
 struct TerminalTitle {
     animated: bool,
@@ -1481,8 +1484,8 @@ impl TerminalTitle {
         }
     }
 
-    fn update(&mut self, activity: Option<&str>, frame: usize) {
-        let title = terminal_title(activity, frame, self.animated);
+    fn update(&mut self, active: bool, frame: usize) {
+        let title = terminal_title(active, frame, self.animated);
         if title != self.current {
             let _ = write_terminal_title(&title);
             self.current = title;
@@ -1503,16 +1506,11 @@ fn terminal_supports_title_animation(term_program: Option<&str>) -> bool {
     )
 }
 
-fn terminal_title(activity: Option<&str>, frame: usize, animated: bool) -> String {
-    match activity {
-        Some(activity) if animated => {
-            format!(
-                "{} SOSUS — {activity}",
-                PROCESSING_DOTS[frame % PROCESSING_DOTS.len()]
-            )
-        }
-        Some(activity) => format!("SOSUS — {activity}"),
-        None => "SOSUS".to_owned(),
+fn terminal_title(active: bool, frame: usize, animated: bool) -> String {
+    match (active, animated) {
+        (true, true) => format!("{} SOSUS", PROCESSING_DOTS[frame % PROCESSING_DOTS.len()]),
+        (true, false) => "• SOSUS".to_owned(),
+        (false, _) => "SOSUS".to_owned(),
     }
 }
 
@@ -2464,15 +2462,9 @@ mod tests {
     fn terminal_title_uses_braille_only_for_known_animated_terminals() {
         assert!(terminal_supports_title_animation(Some("ghostty")));
         assert!(!terminal_supports_title_animation(Some("xterm")));
-        assert_eq!(
-            terminal_title(Some("Transcribing"), 0, true),
-            "⠋ SOSUS — Transcribing"
-        );
-        assert_eq!(
-            terminal_title(Some("Transcribing"), 0, false),
-            "SOSUS — Transcribing"
-        );
-        assert_eq!(terminal_title(None, 0, true), "SOSUS");
+        assert_eq!(terminal_title(true, 0, true), "⠋ SOSUS");
+        assert_eq!(terminal_title(true, 0, false), "• SOSUS");
+        assert_eq!(terminal_title(false, 0, true), "SOSUS");
     }
 
     #[test]
