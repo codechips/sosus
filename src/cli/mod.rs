@@ -5,6 +5,7 @@ use std::{
     io::{self, IsTerminal},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
     str::FromStr,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
@@ -15,6 +16,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::time::{Duration, MissedTickBehavior};
 
 use crate::{archive, asr, audio, config, diarize, export, logging, models, paths, pipeline};
+
+const VOCABULARY_TEMPLATE: &str = "# Sosus vocabulary corrections\n# One line per canonical term: Canonical: mistaken form, another mistaken form\n# Only exact whole-word aliases are replaced, case-insensitively.\n#\n# Asteron: Astaron, Aster one\n# Northstar: North Star\n";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -128,6 +131,8 @@ enum Command {
         #[arg(long, value_name = "N")]
         max_speakers: Option<usize>,
     },
+    /// Open the vocabulary correction dictionary in the default text editor.
+    Vocabulary,
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -207,9 +212,57 @@ pub async fn run() -> anyhow::Result<()> {
             )
             .await
         }
+        Some(Command::Vocabulary) => run_vocabulary(&cli),
         None if io::stdin().is_terminal() && io::stdout().is_terminal() => run_tui(&cli).await,
         None => print_help(),
     }
+}
+
+fn run_vocabulary(cli: &Cli) -> anyhow::Result<()> {
+    let app_paths = paths::AppPaths::resolve(
+        cli.config.as_deref(),
+        cli.data_dir.as_deref(),
+        cli.output_dir.as_deref(),
+    )?;
+    app_paths.ensure_base_directories()?;
+    let path = vocabulary_path(&app_paths)?;
+    ensure_vocabulary_file(&path)?;
+    let status = ProcessCommand::new("open")
+        .arg("-t")
+        .arg(&path)
+        .status()
+        .context("could not open the default text editor")?;
+    anyhow::ensure!(status.success(), "the default text editor did not open");
+    println!("Opened vocabulary: {}", path.display());
+    Ok(())
+}
+
+fn ensure_vocabulary_file(path: &Path) -> anyhow::Result<()> {
+    if path.exists() {
+        paths::ensure_private_file(path)?;
+    } else {
+        use std::io::Write as _;
+
+        let mut file = paths::create_private_file(path)?;
+        file.write_all(VOCABULARY_TEMPLATE.as_bytes())?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+fn vocabulary_path(app_paths: &paths::AppPaths) -> anyhow::Result<PathBuf> {
+    let path = app_paths.vocabulary_file();
+    let legacy = path.with_file_name("terminology.txt");
+    if !path.exists() && legacy.exists() {
+        paths::ensure_private_file(&legacy)?;
+        fs::rename(&legacy, &path).with_context(|| {
+            format!(
+                "could not rename legacy vocabulary file {}",
+                legacy.display()
+            )
+        })?;
+    }
+    Ok(path)
 }
 
 async fn run_resume(
@@ -602,6 +655,17 @@ async fn run_transcribe(
         compact_completed_recording(&effective.effective.output, file, &artifact_dir);
         eprintln!("Transcript artifacts are already complete.");
         return Ok(());
+    }
+    let vocabulary_path = vocabulary_path(&app_paths)?;
+    let vocabulary = asr::Vocabulary::load(&vocabulary_path).with_context(|| {
+        format!(
+            "could not load vocabulary corrections from {}",
+            vocabulary_path.display()
+        )
+    })?;
+    let vocabulary_changes = vocabulary.apply(&mut result);
+    if vocabulary_changes > 0 {
+        eprintln!("Applied {vocabulary_changes} vocabulary correction(s).");
     }
     pipeline_state.begin(
         pipeline::Stage::Export,
@@ -1032,6 +1096,59 @@ mod tests {
         assert_eq!(
             fs::metadata(&imported).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vocabulary_command_creates_a_private_documented_file() {
+        let root = env::temp_dir().join(format!(
+            "sosus-vocabulary-file-test-{}-{}",
+            std::process::id(),
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let path = root.join("config/vocabulary.txt");
+
+        ensure_vocabulary_file(&path).unwrap();
+
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("Canonical: mistaken form")
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vocabulary_path_migrates_the_legacy_file_once() {
+        let root = env::temp_dir().join(format!(
+            "sosus-vocabulary-migration-test-{}-{}",
+            std::process::id(),
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let app_paths = paths::AppPaths::resolve(
+            Some(&root.join("config/config.toml")),
+            Some(&root.join("data")),
+            Some(&root.join("recordings")),
+        )
+        .unwrap();
+        app_paths.ensure_base_directories().unwrap();
+        let legacy = app_paths
+            .vocabulary_file()
+            .with_file_name("terminology.txt");
+        fs::write(&legacy, "Asteron: Astaron\n").unwrap();
+
+        let vocabulary = vocabulary_path(&app_paths).unwrap();
+
+        assert_eq!(vocabulary, app_paths.vocabulary_file());
+        assert!(!legacy.exists());
+        assert_eq!(
+            fs::read_to_string(vocabulary).unwrap(),
+            "Asteron: Astaron\n"
         );
         fs::remove_dir_all(root).unwrap();
     }

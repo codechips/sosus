@@ -14,6 +14,7 @@ mod vocab;
 mod whisper;
 
 pub(crate) use decode::SUPPORTED_EXTENSIONS;
+pub(crate) use vocab::Vocabulary;
 
 /// Samples shared by ASR and diarization after one decode and resample pass.
 #[derive(Clone, Debug)]

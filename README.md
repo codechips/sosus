@@ -64,6 +64,15 @@ sosus resume ~/sosus/recordings/2026-08-22_1430
 `import` copies the source into its new meeting folder before transcription, so
 the archive remains resumable after the original file is moved or deleted.
 
+Open the vocabulary dictionary with your default text editor:
+
+```sh
+sosus vocabulary
+```
+
+Add conservative corrections as `Canonical: mistaken form, another form`; they
+are applied case-insensitively as whole terms when a transcript is exported.
+
 ## Storage and privacy
 
 By default, recordings live in `~/sosus/recordings`. Configuration, downloaded

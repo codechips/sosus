@@ -12,6 +12,7 @@ use time::OffsetDateTime;
 
 const APP_NAME: &str = "sosus";
 const CONFIG_FILE_NAME: &str = "config.toml";
+const VOCABULARY_FILE_NAME: &str = "vocabulary.txt";
 const DEFAULT_OUTPUT_SUFFIX: &str = "sosus/recordings";
 
 /// Every durable path used by sosus.
@@ -126,6 +127,10 @@ impl AppPaths {
 
     pub fn config_file(&self) -> &Path {
         &self.config_file
+    }
+
+    pub fn vocabulary_file(&self) -> PathBuf {
+        self.config_dir.join(VOCABULARY_FILE_NAME)
     }
 
     pub fn data_dir(&self) -> &Path {
