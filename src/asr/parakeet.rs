@@ -21,6 +21,9 @@ const ENCODER: &str = "encoder.int8.onnx";
 const DECODER: &str = "decoder.int8.onnx";
 const JOINER: &str = "joiner.int8.onnx";
 const TOKENS: &str = "tokens.txt";
+/// Keep native decoder input bounded. Long single streams can abort inside sherpa-onnx.
+const MAX_CHUNK_SECONDS: usize = 10 * 60;
+const MAX_CHUNK_SAMPLES: usize = MAX_CHUNK_SECONDS * Audio16kMono::SAMPLE_RATE as usize;
 
 pub struct ParakeetTranscriber {
     recognizer: Option<OfflineRecognizer>,
@@ -102,32 +105,43 @@ impl Transcriber for ParakeetTranscriber {
                     backend: self.capabilities().id,
                     reason: "prepare() must complete before transcription".to_owned(),
                 })?;
-        let stream = recognizer.create_stream();
-        stream.accept_waveform(Audio16kMono::SAMPLE_RATE as i32, audio.samples());
-
-        decode_with_progress_ticks(recognizer, &stream, progress);
-        if progress.is_cancelled() {
-            return Err(AsrError::Cancelled);
+        let chunks = chunk_ranges(audio.samples().len());
+        let mut segments = Vec::new();
+        for (index, range) in chunks.iter().enumerate() {
+            if progress.is_cancelled() {
+                return Err(AsrError::Cancelled);
+            }
+            let stream = recognizer.create_stream();
+            let chunk = &audio.samples()[range.clone()];
+            stream.accept_waveform(Audio16kMono::SAMPLE_RATE as i32, chunk);
+            decode_with_progress_ticks(recognizer, &stream, progress);
+            let result = stream.get_result().ok_or(AsrError::MissingResult {
+                backend: self.capabilities().id,
+            })?;
+            if !result.text.trim().is_empty() {
+                let offset_seconds = range.start as f64 / f64::from(Audio16kMono::SAMPLE_RATE);
+                let chunk_duration = chunk.len() as f64 / f64::from(Audio16kMono::SAMPLE_RATE);
+                let mut words = native_words(&result, chunk_duration, self.capabilities().id)?;
+                for word in &mut words {
+                    word.start_seconds += offset_seconds;
+                    word.end_seconds += offset_seconds;
+                }
+                let start_seconds = words
+                    .first()
+                    .map_or(offset_seconds, |word| word.start_seconds);
+                let end_seconds = words
+                    .last()
+                    .map_or(offset_seconds + chunk_duration, |word| word.end_seconds);
+                segments.push(Segment {
+                    start_seconds,
+                    end_seconds,
+                    text: result.text,
+                    words,
+                    speaker: None,
+                });
+            }
+            progress.report((index + 1) as f32 / chunks.len() as f32);
         }
-        let result = stream.get_result().ok_or(AsrError::MissingResult {
-            backend: self.capabilities().id,
-        })?;
-        let words = native_words(&result, audio.duration_seconds(), self.capabilities().id)?;
-        let segments = if result.text.trim().is_empty() {
-            Vec::new()
-        } else {
-            let start_seconds = words.first().map_or(0.0, |word| word.start_seconds);
-            let end_seconds = words
-                .last()
-                .map_or_else(|| audio.duration_seconds(), |word| word.end_seconds);
-            vec![Segment {
-                start_seconds,
-                end_seconds,
-                text: result.text,
-                words,
-                speaker: None,
-            }]
-        };
         progress.report(1.0);
 
         Ok(TranscriptResult {
@@ -136,6 +150,13 @@ impl Transcriber for ParakeetTranscriber {
             segments,
         })
     }
+}
+
+fn chunk_ranges(sample_count: usize) -> Vec<std::ops::Range<usize>> {
+    (0..sample_count)
+        .step_by(MAX_CHUNK_SAMPLES)
+        .map(|start| start..(start + MAX_CHUNK_SAMPLES).min(sample_count))
+        .collect()
 }
 
 fn require_model_file(
@@ -317,5 +338,18 @@ mod tests {
             native_words(&result, 1.0, "parakeet"),
             Err(AsrError::InvalidWordTimings { .. })
         ));
+    }
+
+    #[test]
+    fn bounds_long_audio_into_contiguous_ten_minute_chunks() {
+        let samples = MAX_CHUNK_SAMPLES * 2 + 7;
+        assert_eq!(
+            chunk_ranges(samples),
+            vec![
+                0..MAX_CHUNK_SAMPLES,
+                MAX_CHUNK_SAMPLES..MAX_CHUNK_SAMPLES * 2,
+                MAX_CHUNK_SAMPLES * 2..samples
+            ]
+        );
     }
 }

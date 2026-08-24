@@ -1320,6 +1320,7 @@ fn launch_pipeline(
                 return;
             }
         };
+        let mut last_stage = "Processing".to_owned();
         if let Some(stderr) = child.stderr.take() {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -1341,6 +1342,7 @@ fn launch_pipeline(
                     None
                 };
                 if let Some(stage) = stage {
+                    last_stage = stage.to_owned();
                     let _ = events.send(PipelineEvent::Stage(stage.to_owned()));
                 }
             }
@@ -1351,7 +1353,7 @@ fn launch_pipeline(
             }
             Ok(status) => {
                 let _ = events.send(PipelineEvent::WorkFailed(format!(
-                    "pipeline exited with {status}"
+                    "{last_stage} failed: pipeline exited with {status}"
                 )));
             }
             Err(error) => {
