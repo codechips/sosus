@@ -422,8 +422,8 @@ async fn run_transcribe(
         let language = (!effective.effective.transcription.language.is_empty())
             .then(|| effective.effective.transcription.language.clone());
         eprintln!(
-            "Transcribing {:.1}s of audio...",
-            decoded.duration_seconds()
+            "Transcribing {} of audio...",
+            format_human_duration(decoded.duration_seconds())
         );
         match transcriber.transcribe(
             &decoded,
@@ -511,7 +511,10 @@ async fn run_transcribe(
         };
         model_progress.finish();
         if let Some((segmentation_dir, embedding_dir)) = model_dirs {
-            eprintln!("Diarizing {:.1}s of audio...", audio.duration_seconds());
+            eprintln!(
+                "Diarizing {} of audio...",
+                format_human_duration(audio.duration_seconds())
+            );
             let diarization = diarize::Diarizer::prepare(&diarize::DiarizationOptions {
                 segmentation_dir,
                 embedding_dir,
@@ -886,6 +889,18 @@ fn print_help() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn format_human_duration(seconds: f64) -> String {
+    let total = seconds.max(0.0).round() as u64;
+    let hours = total / 3_600;
+    let minutes = (total % 3_600) / 60;
+    let seconds = total % 60;
+    match (hours, minutes, seconds) {
+        (0, 0, seconds) => format!("{seconds}s"),
+        (0, minutes, seconds) => format!("{minutes}m {seconds:02}s"),
+        (hours, minutes, _) => format!("{hours}h {minutes:02}m"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -896,6 +911,13 @@ mod tests {
     #[test]
     fn clap_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn formats_processing_durations_for_people() {
+        assert_eq!(format_human_duration(42.0), "42s");
+        assert_eq!(format_human_duration(1_576.6), "26m 17s");
+        assert_eq!(format_human_duration(3_726.0), "1h 02m");
     }
 
     #[test]
