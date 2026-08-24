@@ -75,6 +75,7 @@ pub struct RecordingSession {
     microphone_muted: bool,
     mix_settings: MixSettings,
     limiter: LookaheadLimiter,
+    elapsed_offset_seconds: f64,
 }
 
 impl RecordingSession {
@@ -112,9 +113,56 @@ impl RecordingSession {
         let (system_capture, system_reader) = SystemAudioCapture::start_default()?;
         let (microphone_capture, microphone_reader) = MicrophoneCapture::start_default()?;
         let sink = RecordingWavSink::create(path)?;
+
+        Self::from_captures(
+            system_capture,
+            system_reader,
+            microphone_capture,
+            microphone_reader,
+            sink,
+            mix_settings,
+            0.0,
+        )
+    }
+
+    /// Rebuild capture and append it to a finalized Sosus WAV, preserving the interruption as
+    /// silence so later transcript timestamps remain truthful.
+    pub fn continue_with_mix_settings(
+        path: impl AsRef<Path>,
+        mix_settings: MixSettings,
+        interruption_seconds: f64,
+    ) -> Result<Self, RecordingError> {
+        let (system_capture, system_reader) = SystemAudioCapture::start_default()?;
+        let (microphone_capture, microphone_reader) = MicrophoneCapture::start_default()?;
+        let mut sink = RecordingWavSink::append(path)?;
+        let elapsed_offset_seconds = sink.samples_written() as f64
+            / f64::from(RECORDING_SAMPLE_RATE)
+            + interruption_seconds.max(0.0);
+        let silence_samples =
+            (interruption_seconds.max(0.0) * f64::from(RECORDING_SAMPLE_RATE)).round() as u64;
+        sink.write_silence(silence_samples)?;
+        Self::from_captures(
+            system_capture,
+            system_reader,
+            microphone_capture,
+            microphone_reader,
+            sink,
+            mix_settings,
+            elapsed_offset_seconds,
+        )
+    }
+
+    fn from_captures(
+        system_capture: SystemAudioCapture,
+        system_reader: SystemAudioReader,
+        microphone_capture: MicrophoneCapture,
+        microphone_reader: MicrophoneReader,
+        sink: RecordingWavSink,
+        mix_settings: MixSettings,
+        elapsed_offset_seconds: f64,
+    ) -> Result<Self, RecordingError> {
         let system_converter = RateConverter::new(system_capture.sample_rate());
         let microphone_converter = RateConverter::new(microphone_capture.sample_rate());
-
         Ok(Self {
             system_capture,
             system_reader,
@@ -141,6 +189,7 @@ impl RecordingSession {
             microphone_muted: false,
             mix_settings,
             limiter: LookaheadLimiter::default(),
+            elapsed_offset_seconds,
         })
     }
 
@@ -185,9 +234,9 @@ impl RecordingSession {
 
         let samples_written = self.sink.samples_written();
         let path = self.sink.path().to_path_buf();
-        self.sink.finish()?;
         let duration_seconds = samples_written as f64 / f64::from(RECORDING_SAMPLE_RATE);
-        let elapsed_seconds = self.started.elapsed().as_secs_f64();
+        let elapsed_seconds = self.elapsed_seconds();
+        self.sink.finish()?;
 
         tracing::info!(
             event = "recording_finalized",
@@ -224,7 +273,7 @@ impl RecordingSession {
     }
 
     pub fn elapsed_seconds(&self) -> f64 {
-        self.started.elapsed().as_secs_f64()
+        self.elapsed_offset_seconds + self.started.elapsed().as_secs_f64()
     }
 
     pub fn input_levels(&self) -> (f32, f32) {

@@ -50,6 +50,24 @@ impl RecordingWavSink {
         })
     }
 
+    /// Reopen a finalized Sosus WAV and append to its existing audio.
+    pub fn append(path: impl AsRef<Path>) -> Result<Self, RecordingWavError> {
+        let path = path.as_ref().to_path_buf();
+        let writer = WavWriter::append(&path).map_err(|source| RecordingWavError::Append {
+            path: path.clone(),
+            source,
+        })?;
+        if writer.spec() != recording_spec() {
+            return Err(RecordingWavError::UnexpectedFormat { path });
+        }
+        Ok(Self {
+            samples_written: u64::from(writer.duration()),
+            path,
+            writer,
+            samples_since_checkpoint: 0,
+        })
+    }
+
     /// Append normalized mono samples and checkpoint the RIFF header every second.
     pub fn write_samples(&mut self, samples: &[f32]) -> Result<(), RecordingWavError> {
         for &sample in samples {
@@ -86,6 +104,19 @@ impl RecordingWavSink {
         writer
             .finalize()
             .map_err(|source| RecordingWavError::Write { path, source })
+    }
+
+    /// Append silence without allocating in proportion to the interruption length.
+    pub fn write_silence(&mut self, samples: u64) -> Result<(), RecordingWavError> {
+        const SILENCE_CHUNK_SAMPLES: usize = 8_192;
+        let silence = [0.0; SILENCE_CHUNK_SAMPLES];
+        let mut remaining = samples;
+        while remaining > 0 {
+            let count = remaining.min(SILENCE_CHUNK_SAMPLES as u64) as usize;
+            self.write_samples(&silence[..count])?;
+            remaining -= count as u64;
+        }
+        Ok(())
     }
 
     pub fn samples_written(&self) -> u64 {
@@ -133,6 +164,14 @@ pub enum RecordingWavError {
         #[source]
         source: hound::Error,
     },
+    #[error("could not append to recording WAV at {path}")]
+    Append {
+        path: PathBuf,
+        #[source]
+        source: hound::Error,
+    },
+    #[error("cannot continue recording because {path} is not a Sosus mono 48 kHz PCM WAV")]
+    UnexpectedFormat { path: PathBuf },
 }
 
 #[cfg(test)]
@@ -226,5 +265,27 @@ mod tests {
             Err(RecordingWavError::Create { .. })
         ));
         assert_eq!(fs::read(&path).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn appends_silence_to_a_finalized_sosus_wav() {
+        let temp = TempDir::new();
+        let path = temp.0.join("recording.wav");
+        let mut sink = RecordingWavSink::create(&path).unwrap();
+        sink.write_samples(&[0.5; 4]).unwrap();
+        sink.finish().unwrap();
+
+        let mut sink = RecordingWavSink::append(&path).unwrap();
+        assert_eq!(sink.samples_written(), 4);
+        sink.write_silence(3).unwrap();
+        sink.finish().unwrap();
+
+        let samples = hound::WavReader::open(path)
+            .unwrap()
+            .samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(samples.len(), 7);
+        assert_eq!(&samples[4..], &[0, 0, 0]);
     }
 }

@@ -16,7 +16,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -108,6 +108,7 @@ struct App {
     warnings: VecDeque<String>,
     recording_context: Option<RecordingStartup>,
     recording: Option<ActiveRecording>,
+    interrupted_recording: Option<InterruptedRecording>,
     last_recording: Option<String>,
     pipeline_status: Option<String>,
     pipeline_active: bool,
@@ -145,6 +146,7 @@ impl App {
             warnings: startup.warnings.into(),
             recording_context: startup.recording,
             recording: None,
+            interrupted_recording: None,
             last_recording: None,
             pipeline_status: None,
             pipeline_active: false,
@@ -308,8 +310,14 @@ impl App {
 
         if self.error.is_some() {
             match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::NONE)
+                    if self.interrupted_recording.is_some() =>
+                {
+                    return Some(AppAction::ContinueInterruptedRecording);
+                }
                 (KeyCode::Esc | KeyCode::Enter, _) => {
                     self.error = None;
+                    self.interrupted_recording = None;
                     return None;
                 }
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {}
@@ -602,7 +610,40 @@ impl App {
             ),
         });
         self.input_levels = Some((0.0, 0.0));
+        self.interrupted_recording = None;
         self.message = None;
+        Ok(())
+    }
+
+    async fn continue_recording(&mut self) -> anyhow::Result<()> {
+        let interrupted = self
+            .interrupted_recording
+            .as_ref()
+            .context("there is no interrupted recording to continue")?;
+        let context = self
+            .recording_context
+            .as_ref()
+            .context("recording is not configured")?;
+        let interruption_seconds = interrupted.stopped_at.elapsed().as_secs_f64();
+        let session = audio::RecordingSession::continue_with_mix_settings(
+            &interrupted.path,
+            context.mix_settings,
+            interruption_seconds,
+        )?;
+        tracing::info!(
+            event = "recording_continued",
+            elapsed_ms = (interruption_seconds * 1_000.0) as u64,
+            status = "tui"
+        );
+        self.recording = Some(ActiveRecording {
+            session,
+            meeting_dir: interrupted.meeting_dir.clone(),
+            diarization: interrupted.diarization,
+        });
+        self.input_levels = Some((0.0, 0.0));
+        self.error = None;
+        self.message = Some("Recording continued; interruption is preserved as silence".to_owned());
+        self.interrupted_recording = None;
         Ok(())
     }
 
@@ -631,6 +672,7 @@ impl App {
         }
         Ok(Some(CompletedRecording {
             path: outcome.path,
+            meeting_dir: active.meeting_dir,
             diarization: active.diarization,
         }))
     }
@@ -921,7 +963,15 @@ impl RecordingDiarization {
 
 struct CompletedRecording {
     path: PathBuf,
+    meeting_dir: PathBuf,
     diarization: RecordingDiarization,
+}
+
+struct InterruptedRecording {
+    path: PathBuf,
+    meeting_dir: PathBuf,
+    diarization: RecordingDiarization,
+    stopped_at: Instant,
 }
 
 struct RetranscribeSpeakerPicker {
@@ -932,6 +982,7 @@ struct RetranscribeSpeakerPicker {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AppAction {
     ToggleRecording,
+    ContinueInterruptedRecording,
     ToggleMicrophoneMute,
     StopRecording,
     StopRecordingAndQuit,
@@ -977,15 +1028,26 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                 }
                 if let Err(error) = app.pump_recording() {
                     let finalize_result = app.stop_recording();
-                    let finalized_path = finalize_result
+                    let finalized = finalize_result
                         .as_ref()
                         .ok()
                         .and_then(|recording| recording.as_ref())
-                        .map(|recording| recording.path.clone());
+                        .map(|recording| InterruptedRecording {
+                            path: recording.path.clone(),
+                            meeting_dir: recording.meeting_dir.clone(),
+                            diarization: recording.diarization,
+                            stopped_at: Instant::now(),
+                        });
                     app.error = Some(match finalize_result.err() {
                         Some(finalize) => format!("{error:#}; finalization also failed: {finalize:#}"),
-                        None => match finalized_path {
-                            Some(path) => format!("{error:#}; saved partial recording to {}", path.display()),
+                        None => match finalized {
+                            Some(interrupted) => {
+                                let path = interrupted.path.display().to_string();
+                                app.interrupted_recording = Some(interrupted);
+                                format!(
+                                    "{error:#}\n\nSaved partial recording to {path}.\n\n[c] Continue after fixing the audio issue — the interruption will be preserved as silence.\n[Enter/Esc] Dismiss"
+                                )
+                            }
                             None => format!("{error:#}"),
                         },
                     });
@@ -1013,6 +1075,13 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                             Some(AppAction::ToggleRecording) => {
                                 if let Err(error) = app.start_recording().await {
                                     app.error = Some(format!("{error:#}"));
+                                }
+                            }
+                            Some(AppAction::ContinueInterruptedRecording) => {
+                                if let Err(error) = app.continue_recording().await {
+                                    app.error = Some(format!(
+                                        "Could not continue the partial recording: {error:#}\n\n[c] Retry  [Enter/Esc] Dismiss"
+                                    ));
                                 }
                             }
                             Some(AppAction::ToggleMicrophoneMute) => {
@@ -1414,6 +1483,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("Tab / Shift+Tab  Move focus"),
         Line::from("F2               Settings"),
         Line::from("r                Start / stop recording"),
+        Line::from("c                Continue an interrupted recording"),
         Line::from("m                Mute / unmute microphone"),
         Line::from("s                Change expected speakers while recording"),
         Line::from("t                Process / re-transcribe selected recording"),
@@ -1943,6 +2013,26 @@ mod tests {
         assert_eq!(
             app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
             Some(AppAction::ToggleRecording)
+        );
+    }
+
+    #[test]
+    fn continue_key_is_available_only_for_an_interrupted_recording_dialog() {
+        let mut app = app();
+        app.error = Some("system-audio capture failed".to_owned());
+        app.interrupted_recording = Some(InterruptedRecording {
+            path: PathBuf::from("/tmp/meeting/recording.wav"),
+            meeting_dir: PathBuf::from("/tmp/meeting"),
+            diarization: RecordingDiarization {
+                enabled: false,
+                expected_speakers: None,
+            },
+            stopped_at: Instant::now(),
+        });
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Some(AppAction::ContinueInterruptedRecording)
         );
     }
 
