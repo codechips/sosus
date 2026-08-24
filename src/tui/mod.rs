@@ -56,6 +56,8 @@ const DEFAULT_SIDEBAR_WIDTH: u16 = 28;
 const MINIMUM_SIDEBAR_WIDTH: u16 = 18;
 const MINIMUM_TRANSCRIPT_WIDTH: u16 = 40;
 const PROCESSING_DOTS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(1);
+const RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,6 +111,7 @@ struct App {
     recording_context: Option<RecordingStartup>,
     recording: Option<ActiveRecording>,
     interrupted_recording: Option<InterruptedRecording>,
+    reconnecting: Option<ReconnectingRecording>,
     last_recording: Option<String>,
     pipeline_status: Option<String>,
     pipeline_active: bool,
@@ -147,6 +150,7 @@ impl App {
             recording_context: startup.recording,
             recording: None,
             interrupted_recording: None,
+            reconnecting: None,
             last_recording: None,
             pipeline_status: None,
             pipeline_active: false,
@@ -402,6 +406,7 @@ impl App {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
                 self.should_quit = true;
             }
+            (KeyCode::Char('r'), _) if self.reconnecting.is_some() => {}
             (KeyCode::Char('r'), _) => return Some(AppAction::ToggleRecording),
             (KeyCode::Char('m'), _) => return microphone_mute_action(self.recording.is_some()),
             (KeyCode::Char('s'), _) if self.recording.is_some() => {
@@ -611,6 +616,7 @@ impl App {
         });
         self.input_levels = Some((0.0, 0.0));
         self.interrupted_recording = None;
+        self.reconnecting = None;
         self.message = None;
         Ok(())
     }
@@ -645,6 +651,80 @@ impl App {
         self.message = Some("Recording continued; interruption is preserved as silence".to_owned());
         self.interrupted_recording = None;
         Ok(())
+    }
+
+    fn begin_reconnect(&mut self, failure: String, completed: CompletedRecording) {
+        self.reconnecting = Some(ReconnectingRecording {
+            interrupted: InterruptedRecording {
+                path: completed.path,
+                meeting_dir: completed.meeting_dir,
+                diarization: completed.diarization,
+                stopped_at: Instant::now(),
+            },
+            failure,
+            started_at: Instant::now(),
+            next_attempt: Instant::now(),
+            attempts: 0,
+        });
+        self.message = None;
+    }
+
+    fn retry_reconnect(&mut self) {
+        let Some(reconnecting) = &mut self.reconnecting else {
+            return;
+        };
+        let now = Instant::now();
+        if now.duration_since(reconnecting.started_at) >= RECONNECT_TIMEOUT {
+            let reconnecting = self.reconnecting.take().expect("reconnect state exists");
+            let path = reconnecting.interrupted.path.display().to_string();
+            self.interrupted_recording = Some(reconnecting.interrupted);
+            self.error = Some(format!(
+                "{}\n\nSaved partial recording to {path}. Automatic reconnection did not succeed within 30 seconds.\n\n[c] Continue after fixing the audio issue — the interruption will be preserved as silence.\n[Enter/Esc] Dismiss",
+                reconnecting.failure
+            ));
+            return;
+        }
+        if now < reconnecting.next_attempt {
+            return;
+        }
+        reconnecting.attempts += 1;
+        reconnecting.next_attempt = now + RECONNECT_INTERVAL;
+        let Some(context) = &self.recording_context else {
+            return;
+        };
+        let interruption_seconds = reconnecting.interrupted.stopped_at.elapsed().as_secs_f64();
+        match audio::RecordingSession::continue_with_mix_settings(
+            &reconnecting.interrupted.path,
+            context.mix_settings,
+            interruption_seconds,
+        ) {
+            Ok(session) => {
+                tracing::info!(
+                    event = "recording_auto_reconnected",
+                    attempt = reconnecting.attempts,
+                    elapsed_ms = (interruption_seconds * 1_000.0) as u64,
+                    status = "tui"
+                );
+                self.recording = Some(ActiveRecording {
+                    session,
+                    meeting_dir: reconnecting.interrupted.meeting_dir.clone(),
+                    diarization: reconnecting.interrupted.diarization,
+                });
+                self.input_levels = Some((0.0, 0.0));
+                self.message =
+                    Some("Audio reconnected; interruption preserved as silence".to_owned());
+                self.reconnecting = None;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "recording_reconnect_attempt",
+                    attempt = reconnecting.attempts,
+                    error_category = "capture_start_failed",
+                    status = "retrying"
+                );
+                let _ = error;
+            }
+        }
     }
 
     fn stop_recording(&mut self) -> anyhow::Result<Option<CompletedRecording>> {
@@ -974,6 +1054,14 @@ struct InterruptedRecording {
     stopped_at: Instant,
 }
 
+struct ReconnectingRecording {
+    interrupted: InterruptedRecording,
+    failure: String,
+    started_at: Instant,
+    next_attempt: Instant,
+    attempts: u32,
+}
+
 struct RetranscribeSpeakerPicker {
     path: PathBuf,
     diarization: RecordingDiarization,
@@ -1022,7 +1110,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
 
         tokio::select! {
             _ = tick.tick() => {
-                if app.pipeline_active {
+                if app.pipeline_active || app.reconnecting.is_some() {
                     app.processing_spinner_frame =
                         (app.processing_spinner_frame + 1) % PROCESSING_DOTS.len();
                 }
@@ -1042,15 +1130,25 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                         Some(finalize) => format!("{error:#}; finalization also failed: {finalize:#}"),
                         None => match finalized {
                             Some(interrupted) => {
-                                let path = interrupted.path.display().to_string();
-                                app.interrupted_recording = Some(interrupted);
-                                format!(
-                                    "{error:#}\n\nSaved partial recording to {path}.\n\n[c] Continue after fixing the audio issue — the interruption will be preserved as silence.\n[Enter/Esc] Dismiss"
-                                )
+                                app.begin_reconnect(
+                                    format!("{error:#}"),
+                                    CompletedRecording {
+                                        path: interrupted.path,
+                                        meeting_dir: interrupted.meeting_dir,
+                                        diarization: interrupted.diarization,
+                                    },
+                                );
+                                String::new()
                             }
                             None => format!("{error:#}"),
                         },
                     });
+                    if app.reconnecting.is_some() {
+                        app.error = None;
+                    }
+                }
+                if app.reconnecting.is_some() {
+                    app.retry_reconnect();
                 }
             }
             maybe_event = input.recv() => {
@@ -1754,6 +1852,15 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         } else {
             Line::from(format!(" {stage}"))
         }
+    } else if let Some(reconnecting) = &app.reconnecting {
+        let elapsed = reconnecting.started_at.elapsed().as_secs();
+        Line::from(vec![
+            Span::styled(
+                format!(" {}", PROCESSING_DOTS[app.processing_spinner_frame]),
+                theme::warning_text(),
+            ),
+            Span::raw(format!(" Reconnecting audio… {elapsed}s")),
+        ])
     } else if let Some(message) = &app.message {
         Line::from(format!(" {message}"))
     } else {
