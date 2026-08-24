@@ -218,15 +218,20 @@ fn is_safe_field(name: &str) -> bool {
         name,
         "attempt"
             | "backend"
+            | "count"
             | "duration_ms"
             | "elapsed_ms"
             | "error_category"
             | "event"
             | "meeting_id"
             | "model_id"
+            | "microphone_channels"
+            | "microphone_sample_rate"
             | "size_bytes"
             | "stage"
             | "status"
+            | "system_channels"
+            | "system_sample_rate"
     )
 }
 

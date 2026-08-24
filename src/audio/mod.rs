@@ -2,6 +2,7 @@
 
 mod compact;
 mod echo;
+mod health;
 mod level;
 mod mic;
 mod permission;

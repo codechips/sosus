@@ -13,6 +13,7 @@ use time::OffsetDateTime;
 
 use super::{
     echo::EchoCanceller,
+    health::{StreamEvents, StreamFailure},
     mic::{MicrophoneCapture, MicrophoneCaptureError, MicrophoneReader},
     tap::{SystemAudioCapture, SystemAudioCaptureError, SystemAudioReader},
     wav::{RECORDING_SAMPLE_RATE, RecordingWavError, RecordingWavSink},
@@ -147,10 +148,26 @@ impl RecordingSession {
     pub fn pump(&mut self) -> Result<(), RecordingError> {
         self.system_peak *= 0.82;
         self.microphone_peak *= 0.82;
-        if self.system_reader.stream_failed() {
-            return Err(RecordingError::SystemStreamFailed);
+        self.log_stream_events("system_audio", self.system_reader.take_stream_events());
+        self.log_stream_events("microphone", self.microphone_reader.take_stream_events());
+        if let Some(failure) = self.system_reader.stream_failure() {
+            tracing::error!(
+                event = "recording_capture_failed",
+                error_category = failure.category(),
+                status = "system_audio"
+            );
+            return Err(RecordingError::SystemStreamFailed { failure });
         }
-        self.microphone_failed |= self.microphone_reader.stream_failed();
+        if let Some(failure) = self.microphone_reader.stream_failure() {
+            if !self.microphone_failed {
+                tracing::warn!(
+                    event = "recording_capture_failed",
+                    error_category = failure.category(),
+                    status = "microphone"
+                );
+            }
+            self.microphone_failed = true;
+        }
 
         self.drain_microphone();
         self.drain_system();
@@ -169,11 +186,28 @@ impl RecordingSession {
         let samples_written = self.sink.samples_written();
         let path = self.sink.path().to_path_buf();
         self.sink.finish()?;
+        let duration_seconds = samples_written as f64 / f64::from(RECORDING_SAMPLE_RATE);
+        let elapsed_seconds = self.started.elapsed().as_secs_f64();
+
+        tracing::info!(
+            event = "recording_finalized",
+            duration_ms = (duration_seconds * 1_000.0) as u64,
+            elapsed_ms = (elapsed_seconds * 1_000.0) as u64,
+            status = "complete"
+        );
+        if (elapsed_seconds - duration_seconds).abs() > 1.0 {
+            tracing::warn!(
+                event = "recording_timing_mismatch",
+                duration_ms = (duration_seconds * 1_000.0) as u64,
+                elapsed_ms = (elapsed_seconds * 1_000.0) as u64,
+                status = "audio_shorter_than_wall_time"
+            );
+        }
 
         Ok(RecordingOutcome {
             path,
-            duration_seconds: samples_written as f64 / f64::from(RECORDING_SAMPLE_RATE),
-            elapsed_seconds: self.started.elapsed().as_secs_f64(),
+            duration_seconds,
+            elapsed_seconds,
             system_dropouts: self.system_dropouts,
             microphone_dropouts: self.microphone_dropouts,
             microphone_failed: self.microphone_failed,
@@ -211,6 +245,36 @@ impl RecordingSession {
 
     pub fn microphone_muted(&self) -> bool {
         self.microphone_muted
+    }
+
+    fn log_stream_events(&self, status: &'static str, events: StreamEvents) {
+        if events.is_empty() {
+            return;
+        }
+        if events.device_changes > 0 {
+            tracing::warn!(
+                event = "recording_capture_event",
+                error_category = "device_changed",
+                status,
+                count = events.device_changes,
+            );
+        }
+        if events.xruns > 0 {
+            tracing::warn!(
+                event = "recording_capture_event",
+                error_category = "xrun",
+                status,
+                count = events.xruns,
+            );
+        }
+        if events.realtime_denied > 0 {
+            tracing::warn!(
+                event = "recording_capture_event",
+                error_category = "realtime_denied",
+                status,
+                count = events.realtime_denied,
+            );
+        }
     }
 
     fn drain_microphone(&mut self) {
@@ -472,8 +536,12 @@ pub enum RecordingError {
     MicrophoneCapture(#[from] MicrophoneCaptureError),
     #[error(transparent)]
     Wav(#[from] RecordingWavError),
-    #[error("system-audio capture failed while recording")]
-    SystemStreamFailed,
+    #[error(
+        "system-audio capture failed while recording ({category}); {hint}",
+        category = .failure.category(),
+        hint = .failure.recovery_hint()
+    )]
+    SystemStreamFailed { failure: StreamFailure },
 }
 
 #[cfg(test)]

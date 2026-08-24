@@ -583,6 +583,15 @@ impl App {
             started_at,
             context.mix_settings,
         )?;
+        let formats = session.source_formats();
+        tracing::info!(
+            event = "recording_started",
+            status = "tui",
+            system_sample_rate = formats.system_sample_rate,
+            system_channels = formats.system_channels,
+            microphone_sample_rate = formats.microphone_sample_rate,
+            microphone_channels = formats.microphone_channels,
+        );
         self.recording = Some(ActiveRecording {
             session,
             meeting_dir,
@@ -967,10 +976,18 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                         (app.processing_spinner_frame + 1) % PROCESSING_DOTS.len();
                 }
                 if let Err(error) = app.pump_recording() {
-                    let finalize_error = app.stop_recording().err();
-                    app.error = Some(match finalize_error {
+                    let finalize_result = app.stop_recording();
+                    let finalized_path = finalize_result
+                        .as_ref()
+                        .ok()
+                        .and_then(|recording| recording.as_ref())
+                        .map(|recording| recording.path.clone());
+                    app.error = Some(match finalize_result.err() {
                         Some(finalize) => format!("{error:#}; finalization also failed: {finalize:#}"),
-                        None => format!("{error:#}"),
+                        None => match finalized_path {
+                            Some(path) => format!("{error:#}; saved partial recording to {}", path.display()),
+                            None => format!("{error:#}"),
+                        },
                     });
                 }
             }

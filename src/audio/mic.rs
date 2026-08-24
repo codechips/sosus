@@ -2,7 +2,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 
 use cpal::{
@@ -11,6 +11,8 @@ use cpal::{
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use thiserror::Error;
+
+use super::health::{StreamEvents, StreamFailure, StreamHealth};
 
 /// Length of the preallocated callback-to-writer queue.
 const QUEUE_SECONDS: usize = 2;
@@ -41,7 +43,7 @@ impl MicrophoneCapture {
             .ok_or(MicrophoneCaptureError::QueueCapacityOverflow { sample_rate })?;
         let (producer, consumer) = RingBuffer::new(capacity);
         let dropped_frames = Arc::new(AtomicU64::new(0));
-        let stream_failed = Arc::new(AtomicBool::new(false));
+        let stream_health = Arc::new(StreamHealth::default());
         let sample_format = supported.sample_format();
         let config = supported.into();
 
@@ -52,7 +54,7 @@ impl MicrophoneCapture {
                 channels,
                 producer,
                 Arc::clone(&dropped_frames),
-                Arc::clone(&stream_failed),
+                Arc::clone(&stream_health),
             ),
             SampleFormat::I16 => build_stream::<i16>(
                 &device,
@@ -60,7 +62,7 @@ impl MicrophoneCapture {
                 channels,
                 producer,
                 Arc::clone(&dropped_frames),
-                Arc::clone(&stream_failed),
+                Arc::clone(&stream_health),
             ),
             SampleFormat::I32 => build_stream::<i32>(
                 &device,
@@ -68,7 +70,7 @@ impl MicrophoneCapture {
                 channels,
                 producer,
                 Arc::clone(&dropped_frames),
-                Arc::clone(&stream_failed),
+                Arc::clone(&stream_health),
             ),
             SampleFormat::I64 => build_stream::<i64>(
                 &device,
@@ -76,7 +78,7 @@ impl MicrophoneCapture {
                 channels,
                 producer,
                 Arc::clone(&dropped_frames),
-                Arc::clone(&stream_failed),
+                Arc::clone(&stream_health),
             ),
             SampleFormat::U8 => build_stream::<u8>(
                 &device,
@@ -84,7 +86,7 @@ impl MicrophoneCapture {
                 channels,
                 producer,
                 Arc::clone(&dropped_frames),
-                Arc::clone(&stream_failed),
+                Arc::clone(&stream_health),
             ),
             SampleFormat::U16 => build_stream::<u16>(
                 &device,
@@ -92,7 +94,7 @@ impl MicrophoneCapture {
                 channels,
                 producer,
                 Arc::clone(&dropped_frames),
-                Arc::clone(&stream_failed),
+                Arc::clone(&stream_health),
             ),
             SampleFormat::U32 => build_stream::<u32>(
                 &device,
@@ -100,7 +102,7 @@ impl MicrophoneCapture {
                 channels,
                 producer,
                 Arc::clone(&dropped_frames),
-                Arc::clone(&stream_failed),
+                Arc::clone(&stream_health),
             ),
             SampleFormat::U64 => build_stream::<u64>(
                 &device,
@@ -108,7 +110,7 @@ impl MicrophoneCapture {
                 channels,
                 producer,
                 Arc::clone(&dropped_frames),
-                Arc::clone(&stream_failed),
+                Arc::clone(&stream_health),
             ),
             SampleFormat::F32 => build_stream::<f32>(
                 &device,
@@ -116,7 +118,7 @@ impl MicrophoneCapture {
                 channels,
                 producer,
                 Arc::clone(&dropped_frames),
-                Arc::clone(&stream_failed),
+                Arc::clone(&stream_health),
             ),
             SampleFormat::F64 => build_stream::<f64>(
                 &device,
@@ -124,7 +126,7 @@ impl MicrophoneCapture {
                 channels,
                 producer,
                 Arc::clone(&dropped_frames),
-                Arc::clone(&stream_failed),
+                Arc::clone(&stream_health),
             ),
             unsupported => {
                 return Err(MicrophoneCaptureError::UnsupportedSampleFormat {
@@ -146,7 +148,7 @@ impl MicrophoneCapture {
         let reader = MicrophoneReader {
             consumer,
             dropped_frames,
-            stream_failed,
+            stream_health,
         };
         Ok((capture, reader))
     }
@@ -164,7 +166,7 @@ impl MicrophoneCapture {
 pub struct MicrophoneReader {
     consumer: Consumer<f32>,
     dropped_frames: Arc<AtomicU64>,
-    stream_failed: Arc<AtomicBool>,
+    stream_health: Arc<StreamHealth>,
 }
 
 impl MicrophoneReader {
@@ -180,8 +182,12 @@ impl MicrophoneReader {
     }
 
     /// Whether CPAL has reported a stream error since capture started.
-    pub fn stream_failed(&self) -> bool {
-        self.stream_failed.load(Ordering::Relaxed)
+    pub fn stream_failure(&self) -> Option<StreamFailure> {
+        self.stream_health.failure()
+    }
+
+    pub fn take_stream_events(&self) -> StreamEvents {
+        self.stream_health.take_events()
     }
 }
 
@@ -191,7 +197,7 @@ fn build_stream<T>(
     channels: u16,
     mut producer: Producer<f32>,
     dropped_frames: Arc<AtomicU64>,
-    stream_failed: Arc<AtomicBool>,
+    stream_health: Arc<StreamHealth>,
 ) -> Result<Stream, cpal::Error>
 where
     T: SizedSample,
@@ -202,8 +208,8 @@ where
         move |input: &[T], _| {
             push_interleaved_mono(input, channels, &mut producer, &dropped_frames);
         },
-        move |_| {
-            stream_failed.store(true, Ordering::Relaxed);
+        move |error| {
+            stream_health.report(error.kind());
         },
         None,
     )
@@ -298,11 +304,11 @@ mod tests {
         producer.push(0.25).unwrap();
         producer.push(0.5).unwrap();
         let dropped_frames = Arc::new(AtomicU64::new(3));
-        let stream_failed = Arc::new(AtomicBool::new(false));
+        let stream_health = Arc::new(StreamHealth::default());
         let mut reader = MicrophoneReader {
             consumer,
             dropped_frames: Arc::clone(&dropped_frames),
-            stream_failed: Arc::clone(&stream_failed),
+            stream_health: Arc::clone(&stream_health),
         };
 
         let mut output = [0.0; 4];
@@ -310,8 +316,11 @@ mod tests {
         assert_eq!(&output[..2], &[0.25, 0.5]);
         assert_eq!(reader.take_dropped_frames(), 3);
         assert_eq!(reader.take_dropped_frames(), 0);
-        assert!(!reader.stream_failed());
-        stream_failed.store(true, Ordering::Relaxed);
-        assert!(reader.stream_failed());
+        assert_eq!(reader.stream_failure(), None);
+        stream_health.report(cpal::ErrorKind::DeviceNotAvailable);
+        assert_eq!(
+            reader.stream_failure(),
+            Some(StreamFailure::DeviceNotAvailable)
+        );
     }
 }

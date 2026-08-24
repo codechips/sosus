@@ -6,7 +6,7 @@ use std::{
     ptr::NonNull,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     thread,
     time::Duration,
@@ -37,6 +37,8 @@ use objc2_core_foundation::{
 use objc2_foundation::{NSArray, NSNumber, NSString};
 use rtrb::{Consumer, Producer, RingBuffer};
 use thiserror::Error;
+
+use super::health::{StreamEvents, StreamFailure, StreamHealth};
 
 const QUEUE_SECONDS: usize = 2;
 const AGGREGATE_LOOKUP_ATTEMPTS: usize = 50;
@@ -83,7 +85,7 @@ impl SystemAudioCapture {
             .ok_or(SystemAudioCaptureError::QueueCapacityOverflow { sample_rate })?;
         let (producer, consumer) = RingBuffer::new(capacity);
         let dropped_frames = Arc::new(AtomicU64::new(0));
-        let stream_failed = Arc::new(AtomicBool::new(false));
+        let stream_health = Arc::new(StreamHealth::default());
         let sample_format = supported.sample_format();
         let config = supported.into();
 
@@ -95,7 +97,7 @@ impl SystemAudioCapture {
                     channels,
                     producer,
                     Arc::clone(&dropped_frames),
-                    Arc::clone(&stream_failed),
+                    Arc::clone(&stream_health),
                 )
             };
         }
@@ -132,7 +134,7 @@ impl SystemAudioCapture {
         let reader = SystemAudioReader {
             consumer,
             dropped_frames,
-            stream_failed,
+            stream_health,
         };
         Ok((capture, reader))
     }
@@ -420,7 +422,7 @@ fn map_build_error(source: cpal::Error) -> SystemAudioCaptureError {
 pub struct SystemAudioReader {
     consumer: Consumer<f32>,
     dropped_frames: Arc<AtomicU64>,
-    stream_failed: Arc<AtomicBool>,
+    stream_health: Arc<StreamHealth>,
 }
 
 impl SystemAudioReader {
@@ -433,8 +435,12 @@ impl SystemAudioReader {
         self.dropped_frames.swap(0, Ordering::Relaxed)
     }
 
-    pub fn stream_failed(&self) -> bool {
-        self.stream_failed.load(Ordering::Relaxed)
+    pub fn stream_failure(&self) -> Option<StreamFailure> {
+        self.stream_health.failure()
+    }
+
+    pub fn take_stream_events(&self) -> StreamEvents {
+        self.stream_health.take_events()
     }
 }
 
@@ -444,7 +450,7 @@ fn build_stream<T>(
     channels: u16,
     mut producer: Producer<f32>,
     dropped_frames: Arc<AtomicU64>,
-    stream_failed: Arc<AtomicBool>,
+    stream_health: Arc<StreamHealth>,
 ) -> Result<Stream, cpal::Error>
 where
     T: SizedSample,
@@ -455,8 +461,8 @@ where
         move |input: &[T], _| {
             push_interleaved_mono(input, channels, &mut producer, &dropped_frames);
         },
-        move |_| {
-            stream_failed.store(true, Ordering::Relaxed);
+        move |error| {
+            stream_health.report(error.kind());
         },
         None,
     )

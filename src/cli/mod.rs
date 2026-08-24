@@ -759,6 +759,11 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
 
     let outcome = session.finish().context("could not finalize recording")?;
     if let Some(error) = recording_error {
+        eprintln!(
+            "Saved partial recording: {} ({:.1}s)",
+            outcome.path.display(),
+            outcome.duration_seconds
+        );
         return Err(error).context("recording stopped because system audio failed");
     }
 
