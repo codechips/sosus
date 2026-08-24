@@ -2695,7 +2695,7 @@ dependencies = [
 
 [[package]]
 name = "sosus"
-version = "2026.8.24-beta.2"
+version = "2026.8.24-beta.3"
 dependencies = [
  "anyhow",
  "block2",
