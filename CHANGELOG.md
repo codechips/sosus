@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Equalize voice levels before diarization. A voice recorded well below another (a speaker sitting away from the microphone, or a remote participant mixed low) no longer collapses the meeting into a single speaker.
+
 ## 2026.8.26-beta.3 — 2026-08-26
 
 ### Added

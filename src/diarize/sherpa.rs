@@ -100,6 +100,11 @@ impl Diarizer {
         audio: &Audio16kMono,
         progress: &dyn ProgressSink,
     ) -> Result<DiarizationResult, DiarizationError> {
+        // Equalize voice levels first: unbalanced voices (a speaker far from
+        // the microphone, a remote participant mixed low) collapse into one
+        // cluster otherwise. The recording itself is never modified.
+        let audio = super::normalize_levels(audio);
+        let audio = &audio;
         // sherpa's Rust API exposes one blocking call for the combined pipeline;
         // keep the three named stages visible without inventing false fractions.
         progress.report(DiarizationStage::Segmentation, false);
