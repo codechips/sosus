@@ -31,9 +31,8 @@ pub fn normalize_levels(audio: &Audio16kMono) -> Audio16kMono {
     let mut output = Vec::with_capacity(samples.len());
     let mut previous_gain = 1.0_f32;
     for chunk in samples.chunks(window.max(1)) {
-        let rms = (chunk.iter().map(|sample| sample * sample).sum::<f32>()
-            / chunk.len() as f32)
-            .sqrt();
+        let rms =
+            (chunk.iter().map(|sample| sample * sample).sum::<f32>() / chunk.len() as f32).sqrt();
         let gain = if rms < GATE_RMS {
             1.0
         } else {
