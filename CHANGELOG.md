@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2026.8.26-beta.3 — 2026-08-26
+
+### Added
+
+- Seek audio preview playback by clicking a transcript segment or the preview progress strip.
+
 ## 2026.8.26-beta.2 — 2026-08-26
 
 ### Added

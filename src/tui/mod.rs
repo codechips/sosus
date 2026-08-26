@@ -315,6 +315,20 @@ impl App {
         }
     }
 
+    fn transcript_segment_for_line(&self, line: u16, transcript_width: u16) -> Option<usize> {
+        let mut row = 0u16;
+        let text_width = usize::from(transcript_width.saturating_sub(2)).max(1);
+        for (index, segment) in self.transcript.iter().enumerate() {
+            let text_rows = segment.text.chars().count().div_ceil(text_width).max(1);
+            let height = u16::try_from(text_rows.saturating_add(2)).unwrap_or(u16::MAX);
+            if line < row.saturating_add(height) {
+                return Some(index);
+            }
+            row = row.saturating_add(height);
+        }
+        None
+    }
+
     fn update_preview(&mut self) {
         let Some(preview) = &self.preview else {
             return;
@@ -659,6 +673,17 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left)
+                if self.preview.is_some()
+                    && self.recording.is_none()
+                    && mouse.row == terminal_height.saturating_sub(2) =>
+            {
+                if let Some(preview) = &mut self.preview {
+                    let fraction = f64::from(mouse.column) / f64::from(terminal_width.max(1));
+                    preview.seek(preview.duration_seconds() * fraction.clamp(0.0, 1.0));
+                }
+                self.follow_preview();
+            }
+            MouseEventKind::Down(MouseButton::Left)
                 if mouse.row > 0
                     && mouse
                         .column
@@ -673,6 +698,24 @@ impl App {
                 if let Some(selected) = self.meeting_row_at(mouse.row, terminal_height) {
                     self.select_meeting(selected);
                     self.focus = Focus::Meetings;
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left)
+                if mouse.column >= self.clamped_sidebar_width(terminal_width)
+                    && mouse.row > 0
+                    && mouse.row < terminal_height.saturating_sub(1) =>
+            {
+                let content_row = mouse
+                    .row
+                    .saturating_sub(1)
+                    .saturating_add(self.transcript_scroll);
+                let transcript_width =
+                    terminal_width.saturating_sub(self.clamped_sidebar_width(terminal_width));
+                if let Some(index) = self.transcript_segment_for_line(content_row, transcript_width)
+                {
+                    self.selected_transcript_segment = index;
+                    self.focus = Focus::Transcript;
+                    self.play_selected_segment();
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.resizing_sidebar => {
@@ -2513,6 +2556,30 @@ mod tests {
 
         assert_eq!(app.selected_transcript_segment, 1);
         assert_eq!(app.transcript_scroll, 3);
+    }
+
+    #[test]
+    fn transcript_click_mapping_accounts_for_wrapped_text() {
+        let mut app = app();
+        app.transcript = vec![
+            Segment {
+                start_s: 0.0,
+                end_s: 1.0,
+                speaker: None,
+                text: "short".to_owned(),
+            },
+            Segment {
+                start_s: 1.0,
+                end_s: 2.0,
+                speaker: None,
+                text: "this transcript segment takes two visual lines".to_owned(),
+            },
+        ];
+
+        assert_eq!(app.transcript_segment_for_line(0, 20), Some(0));
+        assert_eq!(app.transcript_segment_for_line(2, 20), Some(0));
+        assert_eq!(app.transcript_segment_for_line(3, 20), Some(1));
+        assert_eq!(app.transcript_segment_for_line(6, 20), Some(1));
     }
 
     #[test]
