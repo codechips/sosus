@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Format saved recording durations in the TUI as minutes or hours instead of raw seconds.
 - Equalize voice levels before diarization. A voice recorded well below another (a speaker sitting away from the microphone, or a remote participant mixed low) no longer collapses the meeting into a single speaker.
 - Record release checksums with a bare archive name so `shasum -c` verifies a downloaded artifact instead of failing on the build machine's absolute path.
 - Render the entire transcript in the reader pane instead of silently stopping after 100 segments.

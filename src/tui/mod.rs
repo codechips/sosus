@@ -1018,8 +1018,8 @@ impl App {
         let outcome = active.session.finish()?;
         self.last_recording = Some(active.meeting_dir.display().to_string());
         self.message = Some(format!(
-            "Saved recording ({:.1}s)",
-            outcome.duration_seconds
+            "Saved recording ({})",
+            format_recording_duration(outcome.duration_seconds)
         ));
         if outcome.system_dropouts > 0 || outcome.microphone_dropouts > 0 {
             self.message = Some(format!(
@@ -2467,6 +2467,18 @@ fn format_playback_time(seconds: f64) -> String {
     }
 }
 
+fn format_recording_duration(seconds: f64) -> String {
+    let total = seconds.max(0.0).round() as u64;
+    let hours = total / 3_600;
+    let minutes = (total % 3_600) / 60;
+    let seconds = total % 60;
+    match (hours, minutes, seconds) {
+        (0, 0, seconds) => format!("{seconds}s"),
+        (0, minutes, seconds) => format!("{minutes}m {seconds:02}s"),
+        (hours, minutes, _) => format!("{hours}h {minutes:02}m"),
+    }
+}
+
 fn render_header_bar(frame: &mut Frame<'_>, area: Rect) {
     let header_area = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(Paragraph::new("").style(theme::status_bar()), header_area);
@@ -2585,6 +2597,13 @@ mod tests {
         assert_eq!(format_playback_time(4.0), "00:04");
         assert_eq!(format_playback_time(125.0), "02:05");
         assert_eq!(format_playback_time(3_726.0), "1:02:06");
+    }
+
+    #[test]
+    fn saved_recording_duration_is_compact_and_human_readable() {
+        assert_eq!(format_recording_duration(42.0), "42s");
+        assert_eq!(format_recording_duration(1_576.6), "26m 17s");
+        assert_eq!(format_recording_duration(3_726.0), "1h 02m");
     }
 
     #[test]
