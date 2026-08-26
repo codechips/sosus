@@ -149,8 +149,9 @@ impl WhisperTranscriber {
                     })?;
             let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
             params.set_n_threads(self.threads);
-            params.set_language(options.language.as_deref());
-            params.set_detect_language(options.language.is_none());
+            let (language, detect_language) = whisper_language_options(options.language.as_deref());
+            params.set_language(language);
+            params.set_detect_language(detect_language);
             params.set_print_special(false);
             params.set_print_progress(false);
             params.set_print_realtime(false);
@@ -209,6 +210,13 @@ fn create_context(path: &Path, backend: &'static str) -> Result<WhisperContext, 
             reason: error.to_string(),
         }
     })
+}
+
+fn whisper_language_options(language: Option<&str>) -> (Option<&str>, bool) {
+    // In whisper.cpp, `detect_language = true` means "identify the language and
+    // stop". A null language with that flag left false performs detection and
+    // then continues with transcription.
+    (language, false)
 }
 
 fn has_audible_signal(audio: &Audio16kMono) -> bool {
@@ -278,6 +286,12 @@ mod tests {
     fn distinguishes_audible_audio_from_silence() {
         assert!(!has_audible_signal(&Audio16kMono::new(vec![0.009; 16])));
         assert!(has_audible_signal(&Audio16kMono::new(vec![0.01; 16])));
+    }
+
+    #[test]
+    fn auto_language_detects_then_transcribes() {
+        assert_eq!(whisper_language_options(None), (None, false));
+        assert_eq!(whisper_language_options(Some("sv")), (Some("sv"), false));
     }
 
     #[test]

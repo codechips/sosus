@@ -9,6 +9,7 @@
 - Process long Whisper recordings in context-sized chunks and fail instead of exporting an empty result.
 - Update Whisper.cpp to v1.8.5 to avoid the macOS Metal initialization crash.
 - Explain safe transcription failure causes in the TUI instead of only reporting a pipeline exit.
+- Allow Whisper automatic language detection to continue into transcription.
 
 ### Added
 
