@@ -1222,7 +1222,7 @@ impl App {
             Some("Reconnecting")
         } else if self.pipeline_active {
             match self.pipeline_status.as_deref() {
-                Some("Transcribing") => Some("Transcribing"),
+                Some(status) if status.starts_with("Transcribing") => Some("Transcribing"),
                 Some("Diarizing") => Some("Diarizing"),
                 _ => Some("Processing"),
             }
@@ -1801,10 +1801,8 @@ fn pipeline_stage_from_stderr(line: &str) -> Option<&str> {
         Some("Reading recording")
     } else if line.starts_with("Loading transcriber") {
         Some("Loading transcriber")
-    } else if line.starts_with("Transcribing using ") {
-        Some(line)
     } else if line.starts_with("Transcribing ") {
-        Some("Transcribing")
+        Some(line)
     } else if line.starts_with("Preparing diarization") {
         Some("Preparing diarization")
     } else if line.starts_with("Diarizing ") {
@@ -2985,6 +2983,14 @@ mod tests {
         assert_eq!(
             retranscription_model(Some(&config)),
             "whisper · whisper-small"
+        );
+    }
+
+    #[test]
+    fn pipeline_status_preserves_transcription_progress() {
+        assert_eq!(
+            pipeline_stage_from_stderr("Transcribing 45% (31m 12s of 69m 32s)..."),
+            Some("Transcribing 45% (31m 12s of 69m 32s)...")
         );
     }
 

@@ -41,7 +41,7 @@ pub fn render(
         return;
     }
     let mut lines = Vec::new();
-    for (index, segment) in segments.iter().take(100).enumerate() {
+    for (index, segment) in segments.iter().enumerate() {
         let speaker = segment.speaker.as_deref().unwrap_or("Unknown");
         let style = if Some(index) == active_segment {
             theme::meter_signal()
