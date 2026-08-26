@@ -11,6 +11,14 @@ use crate::asr::TranscriptResult;
 
 pub fn write_transcript(path: &Path, transcript: &TranscriptResult) -> io::Result<()> {
     let mut markdown = String::from("# Transcript\n\n");
+    if !transcript.provenance.backend.is_empty() {
+        writeln!(
+            markdown,
+            "> **Transcription:** {} · `{}`\n",
+            transcript.provenance.backend, transcript.provenance.model
+        )
+        .map_err(|_| io::Error::other("could not format transcript provenance"))?;
+    }
     for segment in &transcript.segments {
         let speaker = segment.speaker.as_deref().unwrap_or("Unknown speaker");
         writeln!(
@@ -87,6 +95,10 @@ mod tests {
         let transcript = TranscriptResult {
             language: "en".to_owned(),
             duration_seconds: 1.25,
+            provenance: crate::asr::TranscriptionProvenance {
+                backend: "whisper".to_owned(),
+                model: "whisper-large-v3-turbo".to_owned(),
+            },
             segments: vec![Segment {
                 start_seconds: 0.0,
                 end_seconds: 1.25,
@@ -103,6 +115,7 @@ mod tests {
         };
         write_transcript(&path, &transcript).unwrap();
         let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("> **Transcription:** whisper · `whisper-large-v3-turbo`"));
         assert!(content.contains("## [00:00:00.000 - 00:00:01.250] Speaker 1"));
         assert!(content.contains("hello"));
         assert!(!path.with_file_name(".transcript.md.partial").exists());

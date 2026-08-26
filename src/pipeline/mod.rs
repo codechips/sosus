@@ -191,6 +191,22 @@ impl PipelineState {
         Ok(())
     }
 
+    /// Disable an optional stage when resuming work with that capability turned off.
+    ///
+    /// A resumed pipeline may have been interrupted while the optional stage was
+    /// running. In that case it has already been recovered to `Failed`, and the
+    /// downstream export must be allowed to continue with the completed upstream
+    /// artifact instead of being permanently blocked.
+    pub fn disable_optional(&mut self, stage: Stage) {
+        let state = &mut self.stages[stage_index(stage)];
+        if state.status == StageStatus::Completed {
+            return;
+        }
+        state.status = StageStatus::Skipped;
+        state.completed_at = None;
+        state.error_code = None;
+    }
+
     pub fn fail(&mut self, stage: Stage, error_code: &str) -> Result<(), PipelineError> {
         let state = &mut self.stages[stage_index(stage)];
         if state.status != StageStatus::Running {
@@ -526,6 +542,29 @@ mod tests {
             state.stage(Stage::Summarize).unwrap().status,
             StageStatus::Skipped
         );
+    }
+
+    #[test]
+    fn disabling_an_interrupted_optional_stage_unblocks_export() {
+        let mut state = PipelineState::new(&[Stage::Summarize, Stage::Index]);
+        state
+            .begin(Stage::Transcribe, "audio", "asr", "start")
+            .unwrap();
+        state.complete(Stage::Transcribe, "done").unwrap();
+        state
+            .begin(Stage::Diarize, "audio", "diarizer", "start")
+            .unwrap();
+        state.recover_interrupted();
+
+        state.disable_optional(Stage::Diarize);
+
+        assert_eq!(
+            state.stage(Stage::Diarize).unwrap().status,
+            StageStatus::Skipped
+        );
+        state
+            .begin(Stage::Export, "audio", "markdown", "start")
+            .unwrap();
     }
 
     #[test]

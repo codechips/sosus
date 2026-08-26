@@ -67,6 +67,7 @@ mod tests {
         let transcript = TranscriptResult {
             language: "sv".to_owned(),
             duration_seconds: 1.0,
+            provenance: Default::default(),
             segments: vec![Segment {
                 start_seconds: 0.0,
                 end_seconds: 1.0,

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Fixed
+
+- Preserve and recover a completed transcript when optional diarization is interrupted or disabled.
+- Make saving a selected transcription model explicit in Settings.
+- Process long Whisper recordings in context-sized chunks and fail instead of exporting an empty result.
+- Update Whisper.cpp to v1.8.5 to avoid the macOS Metal initialization crash.
+- Explain safe transcription failure causes in the TUI instead of only reporting a pipeline exit.
+
+### Added
+
+- Show the transcription backend and model at the top of new transcript files.
+- Show the configured backend and model before re-transcribing a recording.
+- Identify the selected model in the live transcription status.
+
 ## 2026.8.24-beta.5 — 2026-08-24
 
 ### Added

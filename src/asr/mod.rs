@@ -239,7 +239,15 @@ pub struct Segment {
 pub struct TranscriptResult {
     pub language: String,
     pub duration_seconds: f64,
+    #[serde(default)]
+    pub provenance: TranscriptionProvenance,
     pub segments: Vec<Segment>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptionProvenance {
+    pub backend: String,
+    pub model: String,
 }
 
 #[derive(Clone, Debug)]

@@ -94,6 +94,7 @@ impl SettingsModal {
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
         match key.code {
             KeyCode::Esc => SettingsAction::Cancel,
+            KeyCode::Char('s') => SettingsAction::Save,
             KeyCode::Enter => match self.selected {
                 Field::Language => SettingsAction::PickLanguage,
                 Field::Model => SettingsAction::PickModel,
@@ -505,6 +506,16 @@ mod tests {
             TranscriptionBackend::Whisper
         );
         assert_eq!(settings.config().transcription.model, "whisper-tiny");
+    }
+
+    #[test]
+    fn save_shortcut_commits_a_model_selection() {
+        let mut settings = SettingsModal::new(Config::default());
+        settings.set_model("whisper-small".to_owned());
+        assert_eq!(
+            settings.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+            SettingsAction::Save
+        );
     }
 
     #[test]

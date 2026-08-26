@@ -148,6 +148,7 @@ impl Transcriber for ParakeetTranscriber {
         Ok(TranscriptResult {
             language: options.language.clone().unwrap_or_default(),
             duration_seconds: audio.duration_seconds(),
+            provenance: Default::default(),
             segments,
         })
     }

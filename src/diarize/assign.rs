@@ -309,6 +309,7 @@ mod tests {
         TranscriptResult {
             language: "en".to_owned(),
             duration_seconds: 30.0,
+            provenance: Default::default(),
             segments: spans
                 .iter()
                 .enumerate()

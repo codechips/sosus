@@ -477,6 +477,10 @@ async fn run_transcribe(
         skipped.push(pipeline::Stage::Diarize);
     }
     let mut pipeline_state = resume_state.unwrap_or_else(|| pipeline::PipelineState::new(&skipped));
+    if !effective.effective.diarization.enabled {
+        pipeline_state.disable_optional(pipeline::Stage::Diarize);
+        persist_pipeline(&pipeline_state, &artifact_dir)?;
+    }
     let intermediate_path = artifact_dir.join(INTERMEDIATE_TRANSCRIPT);
     let mut result = resume_transcript;
     let mut audio = None;
@@ -514,9 +518,13 @@ async fn run_transcribe(
         }
         let language = (!effective.effective.transcription.language.is_empty())
             .then(|| effective.effective.transcription.language.clone());
+        let provenance =
+            transcription_provenance(backend, &effective.effective.transcription.model)?;
         eprintln!(
-            "Transcribing {} of audio...",
-            format_human_duration(decoded.duration_seconds())
+            "Transcribing using {} · {} ({} of audio)...",
+            provenance.backend,
+            provenance.model,
+            format_human_duration(decoded.duration_seconds()),
         );
         match transcriber.transcribe(
             &decoded,
@@ -527,8 +535,19 @@ async fn run_transcribe(
             },
             &ConsoleAsrProgress,
         ) {
-            Ok(transcript) => result = Some(transcript),
+            Ok(mut transcript) => {
+                transcript.provenance = provenance;
+                result = Some(transcript);
+            }
             Err(error) => {
+                tracing::warn!(
+                    event = "transcription_failed",
+                    backend = capabilities.id,
+                    model_id = result_model_id(backend, &effective.effective.transcription.model),
+                    error_category = "runtime",
+                    status = "failed"
+                );
+                eprintln!("Transcription failed: {error}");
                 pipeline_state.fail(pipeline::Stage::Transcribe, "runtime")?;
                 persist_pipeline(&pipeline_state, &artifact_dir)?;
                 return Err(anyhow::anyhow!(error)).context("transcription failed");
@@ -538,6 +557,11 @@ async fn run_transcribe(
             &intermediate_path,
             result.as_ref().expect("transcript set"),
         )?;
+        save_transcript_artifacts(
+            &artifact_dir,
+            result.as_ref().expect("transcript set"),
+            false,
+        );
         pipeline_state.complete(pipeline::Stage::Transcribe, &started_text)?;
         persist_pipeline(&pipeline_state, &artifact_dir)?;
         audio = Some(decoded);
@@ -683,26 +707,7 @@ async fn run_transcribe(
         }
     }
 
-    {
-        let transcript_path = artifact_dir.join("transcript.md");
-        match export::write_transcript(&transcript_path, &result) {
-            Ok(()) => eprintln!("Saved transcript: {}", transcript_path.display()),
-            Err(error) => eprintln!(
-                "warning: transcript artifact was not saved to {}: {error}",
-                transcript_path.display()
-            ),
-        }
-        if effective.effective.output.json {
-            let json_path = artifact_dir.join("transcript.json");
-            match export::write_transcript_json(&json_path, &result) {
-                Ok(()) => eprintln!("Saved transcript JSON: {}", json_path.display()),
-                Err(error) => eprintln!(
-                    "warning: transcript JSON was not saved to {}: {error}",
-                    json_path.display()
-                ),
-            }
-        }
-    }
+    save_transcript_artifacts(&artifact_dir, &result, effective.effective.output.json);
     pipeline_state.complete(pipeline::Stage::Export, &started_text)?;
     persist_pipeline(&pipeline_state, &artifact_dir)?;
     compact_completed_recording(&effective.effective.output, file, &artifact_dir);
@@ -722,7 +727,62 @@ fn compact_completed_recording(output: &config::OutputConfig, file: &Path, artif
     }
 }
 
+fn transcription_provenance(
+    backend: asr::TranscriptionBackend,
+    configured_model: &str,
+) -> anyhow::Result<asr::TranscriptionProvenance> {
+    let model = if configured_model.is_empty() {
+        models::manifest()?
+            .asr_model(&backend.to_string())?
+            .alias
+            .clone()
+    } else if Path::new(configured_model).is_absolute() {
+        Path::new(configured_model)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("custom Whisper model")
+            .to_owned()
+    } else {
+        configured_model.to_owned()
+    };
+    Ok(asr::TranscriptionProvenance {
+        backend: backend.to_string(),
+        model,
+    })
+}
+
+fn result_model_id(backend: asr::TranscriptionBackend, configured_model: &str) -> String {
+    transcription_provenance(backend, configured_model)
+        .map(|provenance| provenance.model)
+        .unwrap_or_else(|_| "unknown".to_owned())
+}
+
 const INTERMEDIATE_TRANSCRIPT: &str = ".transcript-work.json";
+
+fn save_transcript_artifacts(
+    artifact_dir: &Path,
+    transcript: &asr::TranscriptResult,
+    write_json: bool,
+) {
+    let transcript_path = artifact_dir.join("transcript.md");
+    match export::write_transcript(&transcript_path, transcript) {
+        Ok(()) => eprintln!("Saved transcript: {}", transcript_path.display()),
+        Err(error) => eprintln!(
+            "warning: transcript artifact was not saved to {}: {error}",
+            transcript_path.display()
+        ),
+    }
+    if write_json {
+        let json_path = artifact_dir.join("transcript.json");
+        match export::write_transcript_json(&json_path, transcript) {
+            Ok(()) => eprintln!("Saved transcript JSON: {}", json_path.display()),
+            Err(error) => eprintln!(
+                "warning: transcript JSON was not saved to {}: {error}",
+                json_path.display()
+            ),
+        }
+    }
+}
 
 fn persist_pipeline(state: &pipeline::PipelineState, meeting_dir: &Path) -> anyhow::Result<()> {
     state
@@ -1023,6 +1083,22 @@ mod tests {
         assert_eq!(format_human_duration(42.0), "42s");
         assert_eq!(format_human_duration(1_576.6), "26m 17s");
         assert_eq!(format_human_duration(3_726.0), "1h 02m");
+    }
+
+    #[test]
+    fn provenance_records_the_resolved_builtin_model() {
+        assert_eq!(
+            transcription_provenance(asr::TranscriptionBackend::Parakeet, "")
+                .unwrap()
+                .model,
+            "parakeet-tdt-0.6b-v3-int8"
+        );
+        assert_eq!(
+            transcription_provenance(asr::TranscriptionBackend::Whisper, "whisper-small")
+                .unwrap()
+                .model,
+            "whisper-small"
+        );
     }
 
     #[test]

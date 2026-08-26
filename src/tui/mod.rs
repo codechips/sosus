@@ -890,7 +890,17 @@ impl App {
         } else if self.confirm_quit_processing {
             render_quit_processing_confirmation(frame, centered_rect(54, 28, area));
         } else if let Some(meeting) = &self.retranscribe_confirmation {
-            render_retranscribe_confirmation(frame, &meeting.name, centered_rect(58, 50, area));
+            let model = retranscription_model(
+                self.settings_context
+                    .as_ref()
+                    .map(|context| &context.config),
+            );
+            render_retranscribe_confirmation(
+                frame,
+                &meeting.name,
+                &model,
+                centered_rect(58, 50, area),
+            );
         } else if let Some(picker) = &self.retranscribe_speakers {
             render_retranscribe_speaker_picker(frame, picker, centered_rect(70, 50, area));
         } else if let Some(meeting) = &self.delete_confirmation {
@@ -1343,26 +1353,14 @@ fn launch_pipeline(
             }
         };
         let mut last_stage = "Processing".to_owned();
+        let mut failure_detail = None;
         if let Some(stderr) = child.stderr.take() {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let stage = if line.starts_with("Preparing transcription") {
-                    Some("Preparing transcription")
-                } else if line.starts_with("Reading recording") {
-                    Some("Reading recording")
-                } else if line.starts_with("Loading transcriber") {
-                    Some("Loading transcriber")
-                } else if line.starts_with("Transcribing ") {
-                    Some("Transcribing")
-                } else if line.starts_with("Preparing diarization") {
-                    Some("Preparing diarization")
-                } else if line.starts_with("Diarizing ") {
-                    Some("Diarizing")
-                } else if line.starts_with("Saving transcript") {
-                    Some("Saving transcript")
-                } else {
-                    None
-                };
+                if let Some(detail) = line.strip_prefix("Transcription failed: ") {
+                    failure_detail = Some(detail.to_owned());
+                }
+                let stage = pipeline_stage_from_stderr(&line);
                 if let Some(stage) = stage {
                     last_stage = stage.to_owned();
                     let _ = events.send(PipelineEvent::Stage(stage.to_owned()));
@@ -1374,8 +1372,10 @@ fn launch_pipeline(
                 let _ = events.send(PipelineEvent::WorkCompleted);
             }
             Ok(status) => {
+                let failure =
+                    failure_detail.unwrap_or_else(|| format!("pipeline exited with {status}"));
                 let _ = events.send(PipelineEvent::WorkFailed(format!(
-                    "{last_stage} failed: pipeline exited with {status}"
+                    "{last_stage} failed: {failure}"
                 )));
             }
             Err(error) => {
@@ -1383,6 +1383,28 @@ fn launch_pipeline(
             }
         }
     });
+}
+
+fn pipeline_stage_from_stderr(line: &str) -> Option<&str> {
+    if line.starts_with("Preparing transcription") {
+        Some("Preparing transcription")
+    } else if line.starts_with("Reading recording") {
+        Some("Reading recording")
+    } else if line.starts_with("Loading transcriber") {
+        Some("Loading transcriber")
+    } else if line.starts_with("Transcribing using ") {
+        Some(line)
+    } else if line.starts_with("Transcribing ") {
+        Some("Transcribing")
+    } else if line.starts_with("Preparing diarization") {
+        Some("Preparing diarization")
+    } else if line.starts_with("Diarizing ") {
+        Some("Diarizing")
+    } else if line.starts_with("Saving transcript") {
+        Some("Saving transcript")
+    } else {
+        None
+    }
 }
 
 fn open_meeting_folder(path: &Path) -> anyhow::Result<()> {
@@ -1698,7 +1720,7 @@ fn render_settings(frame: &mut Frame<'_>, settings: &modals::settings::SettingsM
     content.extend([
         Line::from(""),
         Line::styled(
-            "Enter: choose language/model or save · Esc cancel",
+            "[s] Save changes · Enter choose language/model · Esc cancel",
             theme::secondary_text(),
         ),
     ]);
@@ -1818,7 +1840,29 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, meeting_name: &str, area: R
     );
 }
 
-fn render_retranscribe_confirmation(frame: &mut Frame<'_>, meeting_name: &str, area: Rect) {
+fn retranscription_model(config: Option<&Config>) -> String {
+    let Some(config) = config else {
+        return "the configured transcription model".to_owned();
+    };
+    let backend = config.transcription.backend.to_string();
+    let model = if config.transcription.model.is_empty() {
+        match backend.as_str() {
+            "parakeet" => "parakeet-tdt-0.6b-v3-int8",
+            "whisper" => "whisper-base",
+            _ => "default model",
+        }
+    } else {
+        &config.transcription.model
+    };
+    format!("{backend} · {model}")
+}
+
+fn render_retranscribe_confirmation(
+    frame: &mut Frame<'_>,
+    meeting_name: &str,
+    model: &str,
+    area: Rect,
+) {
     let content = Text::from(vec![
         Line::styled(
             format!("Re-transcribe {meeting_name}?"),
@@ -1829,6 +1873,11 @@ fn render_retranscribe_confirmation(frame: &mut Frame<'_>, meeting_name: &str, a
             "The current transcript stays until the replacement succeeds.",
             theme::secondary_text(),
         ),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Will use: ", theme::secondary_text()),
+            Span::styled(model, theme::primary_text()),
+        ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("[Enter]", theme::primary_text()),
@@ -2361,6 +2410,27 @@ mod tests {
             })
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retranscription_model_names_the_selected_whisper_model() {
+        let mut config = Config::default();
+        config.transcription.backend = crate::asr::TranscriptionBackend::Whisper;
+        config.transcription.model = "whisper-small".to_owned();
+        assert_eq!(
+            retranscription_model(Some(&config)),
+            "whisper · whisper-small"
+        );
+    }
+
+    #[test]
+    fn pipeline_status_preserves_the_transcription_model() {
+        assert_eq!(
+            pipeline_stage_from_stderr(
+                "Transcribing using whisper · whisper-large-v3-turbo (58m 00s of audio)..."
+            ),
+            Some("Transcribing using whisper · whisper-large-v3-turbo (58m 00s of audio)...")
+        );
     }
 
     #[test]
