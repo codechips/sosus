@@ -35,7 +35,7 @@ if ! awk '
     fi
 fi
 
-if grep -nE '^## [0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-beta\.[1-9][0-9]*|-r[2-9][0-9]*)? — [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$CHANGELOG_FILE" >/dev/null; then
+if grep -nE '^## [0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-beta\.[1-9][0-9]*)? — [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$CHANGELOG_FILE" >/dev/null; then
     :
 else
     fail "CHANGELOG.md needs at least one dated calendar-version release heading"

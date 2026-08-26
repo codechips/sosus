@@ -6,6 +6,15 @@
 
 - Equalize voice levels before diarization. A voice recorded well below another (a speaker sitting away from the microphone, or a remote participant mixed low) no longer collapses the meeting into a single speaker.
 
+### Changed
+
+- Drop the `YYYY.M.D-rN` same-day revision version. A corrected build takes the next calendar date, because a hyphen suffix sorts below the plain version under SemVer precedence.
+- Document installing the signed binary from a GitHub release, including the prerelease-aware way to resolve the newest tag.
+
+### Fixed
+
+- Record release checksums with a bare archive name so `shasum -c` verifies a downloaded artifact instead of failing on the build machine's absolute path.
+
 ## 2026.8.26-beta.3 — 2026-08-26
 
 ### Added

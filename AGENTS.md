@@ -38,7 +38,7 @@ changelog itself remains human-written.
 
 ## Release workflow
 
-- sosus uses calendar versions: `YYYY.M.D`, `YYYY.M.D-beta.N`, and `YYYY.M.D-rN`. Do not use SemVer.
+- sosus uses calendar versions: `YYYY.M.D` and `YYYY.M.D-beta.N`. Do not use SemVer.
 - A release tag is `v<version>` and must exactly match `Cargo.toml`. Tags and published artifacts are immutable: never move, reuse, or replace them.
 - Release only from a clean `main` commit after `mise run ci` and `mise run release-version` pass.
 - Pushing a matching `v20*` tag runs GitHub Actions to build, sign, notarize, checksum, and publish the release. Do not create a release tag until the version commit is pushed and GitHub release secrets are configured.

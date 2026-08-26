@@ -53,8 +53,8 @@ assert_regular_binary() {
 release_version() {
     RELEASE_VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$REPOSITORY_ROOT/Cargo.toml")
     [ -n "$RELEASE_VERSION" ] || fail "could not read the package version from Cargo.toml"
-    if ! [[ "$RELEASE_VERSION" =~ ^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-beta\.[1-9][0-9]*|-r[2-9][0-9]*)?$ ]]; then
-        fail "release version must use YYYY.M.D, YYYY.M.D-beta.N, or YYYY.M.D-rN"
+    if ! [[ "$RELEASE_VERSION" =~ ^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-beta\.[1-9][0-9]*)?$ ]]; then
+        fail "release version must use YYYY.M.D or YYYY.M.D-beta.N"
     fi
     RELEASE_DATE=${RELEASE_VERSION%%-*}
     RELEASE_DATE=${RELEASE_DATE//./-}
@@ -241,7 +241,7 @@ notarize_release() {
     fi
     /usr/bin/ditto -c -k --keepParent "$BINARY" "$ARCHIVE"
     chmod 600 "$ARCHIVE"
-    /usr/bin/shasum -a 256 "$ARCHIVE" >"$CHECKSUM"
+    (cd "$DIST_DIRECTORY" && /usr/bin/shasum -a 256 "${ARCHIVE##*/}") >"$CHECKSUM"
     chmod 600 "$CHECKSUM"
     make_temporary_file result sosus-notary-result
     if ! /usr/bin/xcrun notarytool submit \
