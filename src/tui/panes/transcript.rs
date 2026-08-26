@@ -33,7 +33,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, focused: bool, segments: &[Segm
         return;
     }
     let mut lines = Vec::new();
-    for segment in segments.iter().take(100) {
+    for segment in segments.iter() {
         let speaker = segment.speaker.as_deref().unwrap_or("Unknown");
         lines.push(Line::styled(
             format!("{}  {speaker}", timestamp(segment.start_s)),

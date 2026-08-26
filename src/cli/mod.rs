@@ -548,7 +548,7 @@ async fn run_transcribe(
                 vocabulary: Vec::new(),
                 words_required: false,
             },
-            &ConsoleAsrProgress,
+            &ConsoleAsrProgress::new(decoded.duration_seconds()),
         ) {
             Ok(mut transcript) => {
                 transcript.provenance = provenance;
@@ -859,10 +859,36 @@ impl models::ModelProgressSink for ConsoleModelProgress {
     }
 }
 
-struct ConsoleAsrProgress;
+struct ConsoleAsrProgress {
+    total_seconds: f64,
+    last_percent: std::sync::atomic::AtomicU32,
+}
+
+impl ConsoleAsrProgress {
+    fn new(total_seconds: f64) -> Self {
+        Self {
+            total_seconds,
+            last_percent: std::sync::atomic::AtomicU32::new(u32::MAX),
+        }
+    }
+}
 
 impl asr::ProgressSink for ConsoleAsrProgress {
-    fn report(&self, _fraction: f32) {}
+    fn report(&self, fraction: f32) {
+        let percent = (f64::from(fraction.clamp(0.0, 1.0)) * 100.0).floor() as u32;
+        if self
+            .last_percent
+            .swap(percent, std::sync::atomic::Ordering::Relaxed)
+            == percent
+        {
+            return;
+        }
+        eprintln!(
+            "Transcribing {percent}% ({} of {})...",
+            format_human_duration(self.total_seconds * f64::from(percent) / 100.0),
+            format_human_duration(self.total_seconds),
+        );
+    }
 }
 
 struct ConsoleDiarizationProgress;

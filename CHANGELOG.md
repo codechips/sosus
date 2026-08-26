@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Render the entire transcript in the reader pane instead of silently stopping after 100 segments.
+- Report transcription progress ("Transcribing 45% (31m 12s of 69m 32s)...") in the pipeline status instead of a static line for the whole run.
+
 ## 2026.8.26-beta.1 — 2026-08-26
 
 ### Fixed
