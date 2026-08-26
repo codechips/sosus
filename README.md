@@ -54,7 +54,7 @@ sosus transcribe ~/Downloads/meeting.m4a --speakers 3
 sosus transcribe ~/Downloads/meeting.m4a --speakers auto
 ```
 
-Import an existing file into the meeting archive, or resume a meeting whose processing was interrupted:
+Import an existing file into the meeting archive, or resume a meeting whose processing was interrupted. Add `--language sv` to `resume` when you need to override the configured language for that one transcription:
 
 ```sh
 sosus import ~/Downloads/meeting.m4a

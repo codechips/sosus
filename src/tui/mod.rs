@@ -104,7 +104,7 @@ struct App {
     settings_context: Option<SettingsContext>,
     confirm_quit_processing: bool,
     delete_confirmation: Option<Meeting>,
-    retranscribe_confirmation: Option<Meeting>,
+    retranscribe_confirmation: Option<Retranscription>,
     retranscribe_speakers: Option<RetranscribeSpeakerPicker>,
     should_quit: bool,
     message: Option<String>,
@@ -232,6 +232,7 @@ impl App {
                     return Some(AppAction::TranscribeMeeting {
                         path: picker.path,
                         force: true,
+                        language: Some(picker.language),
                         diarization: Some(picker.diarization),
                     });
                 }
@@ -254,7 +255,7 @@ impl App {
         if self.retranscribe_confirmation.is_some() {
             match (key.code, key.modifiers) {
                 (KeyCode::Enter, _) => {
-                    let meeting = self
+                    let retranscription = self
                         .retranscribe_confirmation
                         .take()
                         .expect("retranscription confirmation should contain a meeting");
@@ -265,13 +266,15 @@ impl App {
                     );
                     if diarization.enabled {
                         self.retranscribe_speakers = Some(RetranscribeSpeakerPicker {
-                            path: meeting.path,
+                            path: retranscription.meeting.path,
+                            language: retranscription.language,
                             diarization,
                         });
                     } else {
                         return Some(AppAction::TranscribeMeeting {
-                            path: meeting.path,
+                            path: retranscription.meeting.path,
                             force: true,
+                            language: Some(retranscription.language),
                             diarization: Some(diarization),
                         });
                     }
@@ -343,10 +346,29 @@ impl App {
             match picker.modal.handle_key(key) {
                 modals::picker::PickerAction::Cancel => self.picker = None,
                 modals::picker::PickerAction::Choose(value) => {
-                    if let Some(settings) = &mut self.settings {
-                        match picker.kind {
-                            PickerType::Language => settings.set_language(value),
-                            PickerType::Model if value == "__custom__" => {
+                    match picker.kind.clone() {
+                        PickerType::SettingsLanguage => {
+                            if let Some(settings) = &mut self.settings {
+                                settings.set_language(value);
+                            }
+                        }
+                        PickerType::RecordingLanguage => {
+                            if let Some(recording) = &mut self.recording {
+                                recording.language = value.clone();
+                                self.message = Some(format!(
+                                    "Transcription language: {}",
+                                    language_label(&value)
+                                ));
+                            }
+                        }
+                        PickerType::RetranscribeLanguage(meeting) => {
+                            self.retranscribe_confirmation = Some(Retranscription {
+                                meeting,
+                                language: value,
+                            });
+                        }
+                        PickerType::Model if value == "__custom__" => {
+                            if let Some(settings) = &mut self.settings {
                                 match choose_custom_model() {
                                     Ok(path) => settings.set_model(path.display().to_string()),
                                     Err(error) => {
@@ -355,7 +377,11 @@ impl App {
                                     }
                                 }
                             }
-                            PickerType::Model => settings.set_model(value),
+                        }
+                        PickerType::Model => {
+                            if let Some(settings) = &mut self.settings {
+                                settings.set_model(value);
+                            }
                         }
                     }
                     self.picker = None;
@@ -415,15 +441,31 @@ impl App {
                     active.diarization.cycle_expected_speakers();
                 }
             }
+            (KeyCode::Char('l'), _) if self.recording.is_some() => {
+                self.open_recording_language_picker();
+            }
+            (KeyCode::Char('l'), _) if !self.pipeline_active => {
+                if let Some(meeting) = self.meetings.get(self.selected_meeting) {
+                    self.open_retranscription_language_picker(meeting.clone());
+                }
+            }
             (KeyCode::Char('t'), _) if self.recording.is_none() && !self.pipeline_active => {
                 if let Some(meeting) = self.meetings.get(self.selected_meeting) {
                     if meeting.path.join("transcript.md").is_file() {
-                        self.retranscribe_confirmation = Some(meeting.clone());
+                        self.retranscribe_confirmation = Some(Retranscription {
+                            meeting: meeting.clone(),
+                            language: self
+                                .settings_context
+                                .as_ref()
+                                .map(|context| context.config.transcription.language.clone())
+                                .unwrap_or_default(),
+                        });
                     } else {
                         return Some(AppAction::TranscribeMeeting {
                             path: meeting.path.clone(),
                             force: false,
                             diarization: None,
+                            language: None,
                         });
                     }
                 }
@@ -532,7 +574,7 @@ impl App {
             return;
         };
         self.picker = Some(PickerKind::new(
-            PickerType::Language,
+            PickerType::SettingsLanguage,
             "Language",
             settings
                 .language_options()
@@ -540,6 +582,42 @@ impl App {
                 .map(|(value, label)| (value, label, String::new()))
                 .collect(),
             &settings.config().transcription.language,
+        ));
+    }
+    fn open_recording_language_picker(&mut self) {
+        let Some(recording) = &self.recording else {
+            return;
+        };
+        let backend = self
+            .settings_context
+            .as_ref()
+            .map(|context| context.config.transcription.backend)
+            .unwrap_or_default();
+        self.picker = Some(PickerKind::new(
+            PickerType::RecordingLanguage,
+            "Transcription language",
+            modals::settings::SettingsModal::language_options_for_backend(backend)
+                .into_iter()
+                .map(|(value, label)| (value, label, String::new()))
+                .collect(),
+            &recording.language,
+        ));
+    }
+    fn open_retranscription_language_picker(&mut self, meeting: Meeting) {
+        let Some(context) = &self.settings_context else {
+            self.error = Some("Settings are not configured for this session".to_owned());
+            return;
+        };
+        self.picker = Some(PickerKind::new(
+            PickerType::RetranscribeLanguage(meeting),
+            "Transcription language",
+            modals::settings::SettingsModal::language_options_for_backend(
+                context.config.transcription.backend,
+            )
+            .into_iter()
+            .map(|(value, label)| (value, label, String::new()))
+            .collect(),
+            &context.config.transcription.language,
         ));
     }
     fn open_model_picker(&mut self) {
@@ -609,6 +687,11 @@ impl App {
         self.recording = Some(ActiveRecording {
             session,
             meeting_dir,
+            language: self
+                .settings_context
+                .as_ref()
+                .map(|context| context.config.transcription.language.clone())
+                .unwrap_or_default(),
             diarization: RecordingDiarization::from_config(
                 self.settings_context
                     .as_ref()
@@ -645,6 +728,7 @@ impl App {
         self.recording = Some(ActiveRecording {
             session,
             meeting_dir: interrupted.meeting_dir.clone(),
+            language: interrupted.language.clone(),
             diarization: interrupted.diarization,
         });
         self.input_levels = Some((0.0, 0.0));
@@ -659,6 +743,7 @@ impl App {
             interrupted: InterruptedRecording {
                 path: completed.path,
                 meeting_dir: completed.meeting_dir,
+                language: completed.language,
                 diarization: completed.diarization,
                 stopped_at: Instant::now(),
             },
@@ -709,6 +794,7 @@ impl App {
                 self.recording = Some(ActiveRecording {
                     session,
                     meeting_dir: reconnecting.interrupted.meeting_dir.clone(),
+                    language: reconnecting.interrupted.language.clone(),
                     diarization: reconnecting.interrupted.diarization,
                 });
                 self.input_levels = Some((0.0, 0.0));
@@ -754,6 +840,7 @@ impl App {
         Ok(Some(CompletedRecording {
             path: outcome.path,
             meeting_dir: active.meeting_dir,
+            language: active.language,
             diarization: active.diarization,
         }))
     }
@@ -879,7 +966,7 @@ impl App {
         } else if self.show_help {
             render_help(frame, centered_rect(64, 68, area));
         } else if let Some(picker) = &self.picker {
-            let height = if matches!(picker.kind, PickerType::Model) {
+            let height = if matches!(&picker.kind, PickerType::Model) {
                 54
             } else {
                 72
@@ -889,7 +976,7 @@ impl App {
             render_settings(frame, settings, centered_rect(58, 78, area));
         } else if self.confirm_quit_processing {
             render_quit_processing_confirmation(frame, centered_rect(54, 28, area));
-        } else if let Some(meeting) = &self.retranscribe_confirmation {
+        } else if let Some(retranscription) = &self.retranscribe_confirmation {
             let model = retranscription_model(
                 self.settings_context
                     .as_ref()
@@ -897,8 +984,9 @@ impl App {
             );
             render_retranscribe_confirmation(
                 frame,
-                &meeting.name,
+                &retranscription.meeting.name,
                 &model,
+                &language_label(&retranscription.language),
                 centered_rect(58, 50, area),
             );
         } else if let Some(picker) = &self.retranscribe_speakers {
@@ -972,10 +1060,12 @@ struct SettingsContext {
     model_dir: PathBuf,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum PickerType {
-    Language,
+    SettingsLanguage,
     Model,
+    RecordingLanguage,
+    RetranscribeLanguage(Meeting),
 }
 struct PickerKind {
     kind: PickerType,
@@ -1006,6 +1096,7 @@ impl PickerKind {
 struct ActiveRecording {
     session: audio::RecordingSession,
     meeting_dir: PathBuf,
+    language: String,
     diarization: RecordingDiarization,
 }
 
@@ -1071,12 +1162,14 @@ impl RecordingDiarization {
 struct CompletedRecording {
     path: PathBuf,
     meeting_dir: PathBuf,
+    language: String,
     diarization: RecordingDiarization,
 }
 
 struct InterruptedRecording {
     path: PathBuf,
     meeting_dir: PathBuf,
+    language: String,
     diarization: RecordingDiarization,
     stopped_at: Instant,
 }
@@ -1091,7 +1184,13 @@ struct ReconnectingRecording {
 
 struct RetranscribeSpeakerPicker {
     path: PathBuf,
+    language: String,
     diarization: RecordingDiarization,
+}
+
+struct Retranscription {
+    meeting: Meeting,
+    language: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1104,6 +1203,7 @@ enum AppAction {
     TranscribeMeeting {
         path: PathBuf,
         force: bool,
+        language: Option<String>,
         diarization: Option<RecordingDiarization>,
     },
     OpenMeetingFolder(PathBuf),
@@ -1155,6 +1255,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                         .map(|recording| InterruptedRecording {
                             path: recording.path.clone(),
                             meeting_dir: recording.meeting_dir.clone(),
+                            language: recording.language.clone(),
                             diarization: recording.diarization,
                             stopped_at: Instant::now(),
                         });
@@ -1167,6 +1268,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                                     CompletedRecording {
                                         path: interrupted.path,
                                         meeting_dir: interrupted.meeting_dir,
+                                        language: interrupted.language,
                                         diarization: interrupted.diarization,
                                     },
                                 );
@@ -1194,6 +1296,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                                             &mut app,
                                             recording.path,
                                             false,
+                                            Some(recording.language),
                                             Some(recording.diarization),
                                             &pipeline_tx,
                                         )
@@ -1226,6 +1329,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                                             &mut app,
                                             recording.path,
                                             false,
+                                            Some(recording.language),
                                             Some(recording.diarization),
                                             &pipeline_tx,
                                         )
@@ -1244,9 +1348,17 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                             Some(AppAction::TranscribeMeeting {
                                 path,
                                 force,
+                                language,
                                 diarization,
                             }) => {
-                                launch_pipeline(&mut app, path, force, diarization, &pipeline_tx);
+                                launch_pipeline(
+                                    &mut app,
+                                    path,
+                                    force,
+                                    language,
+                                    diarization,
+                                    &pipeline_tx,
+                                );
                             }
                             Some(AppAction::OpenMeetingFolder(path)) => {
                                 if let Err(error) = open_meeting_folder(&path) {
@@ -1307,6 +1419,7 @@ fn launch_pipeline(
     app: &mut App,
     recording_path: PathBuf,
     force: bool,
+    language: Option<String>,
     diarization: Option<RecordingDiarization>,
     events: &mpsc::UnboundedSender<PipelineEvent>,
 ) {
@@ -1329,6 +1442,9 @@ fn launch_pipeline(
             .arg(output_dir);
         if force {
             command.arg("--force");
+        }
+        if let Some(language) = language {
+            command.arg("--language").arg(language);
         }
         if let Some(diarization) = diarization {
             if diarization.enabled {
@@ -1684,6 +1800,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("c                Continue an interrupted recording"),
         Line::from("m                Mute / unmute microphone"),
         Line::from("s                Change expected speakers while recording"),
+        Line::from("l                Choose transcription language"),
         Line::from("t                Process / re-transcribe selected recording"),
         Line::from("o                Open selected recording in Finder"),
         Line::from("d / D            Delete with confirmation / immediately"),
@@ -1857,10 +1974,19 @@ fn retranscription_model(config: Option<&Config>) -> String {
     format!("{backend} · {model}")
 }
 
+fn language_label(language: &str) -> String {
+    if language.is_empty() {
+        "Auto-detect".to_owned()
+    } else {
+        modals::settings::language_name(language)
+    }
+}
+
 fn render_retranscribe_confirmation(
     frame: &mut Frame<'_>,
     meeting_name: &str,
     model: &str,
+    language: &str,
     area: Rect,
 ) {
     let content = Text::from(vec![
@@ -1877,6 +2003,10 @@ fn render_retranscribe_confirmation(
         Line::from(vec![
             Span::styled("Will use: ", theme::secondary_text()),
             Span::styled(model, theme::primary_text()),
+        ]),
+        Line::from(vec![
+            Span::styled("Language: ", theme::secondary_text()),
+            Span::styled(language, theme::primary_text()),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -2257,6 +2387,7 @@ mod tests {
         app.interrupted_recording = Some(InterruptedRecording {
             path: PathBuf::from("/tmp/meeting/recording.wav"),
             meeting_dir: PathBuf::from("/tmp/meeting"),
+            language: String::new(),
             diarization: RecordingDiarization {
                 enabled: false,
                 expected_speakers: None,
@@ -2348,6 +2479,7 @@ mod tests {
             Some(AppAction::TranscribeMeeting {
                 path: PathBuf::from("/tmp/meeting"),
                 force: false,
+                language: None,
                 diarization: None,
             })
         );
@@ -2357,6 +2489,44 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
             None
         );
+    }
+
+    #[test]
+    fn language_key_for_a_meeting_opens_a_transient_picker_then_confirms() {
+        let mut app = app();
+        let config_path = PathBuf::from("/tmp/sosus-language-picker-config.toml");
+        app.settings_context = Some(SettingsContext {
+            config: Config::default(),
+            fingerprint: config::fingerprint(&config_path).unwrap(),
+            config_path,
+            model_dir: PathBuf::from("/tmp/sosus-language-picker-models"),
+        });
+        app.meetings = vec![Meeting {
+            path: PathBuf::from("/tmp/meeting"),
+            name: "meeting".to_owned(),
+            duration_seconds: None,
+            transcript: Vec::new(),
+        }];
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+            None
+        );
+        assert!(matches!(
+            app.picker.as_ref().map(|picker| &picker.kind),
+            Some(PickerType::RetranscribeLanguage(_))
+        ));
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            None
+        );
+        let confirmation = app
+            .retranscribe_confirmation
+            .as_ref()
+            .expect("language choice should lead to confirmation");
+        assert_eq!(confirmation.meeting.name, "meeting");
+        assert!(confirmation.language.is_empty());
     }
 
     #[test]
@@ -2403,6 +2573,7 @@ mod tests {
             Some(AppAction::TranscribeMeeting {
                 path: root.clone(),
                 force: true,
+                language: Some(String::new()),
                 diarization: Some(RecordingDiarization {
                     enabled: true,
                     expected_speakers: Some(3),
@@ -2464,6 +2635,7 @@ mod tests {
             Some(AppAction::TranscribeMeeting {
                 path: root.clone(),
                 force: true,
+                language: Some(String::new()),
                 diarization: Some(RecordingDiarization {
                     enabled: false,
                     expected_speakers: Some(2),
@@ -2601,6 +2773,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal should construct");
         let picker = RetranscribeSpeakerPicker {
             path: PathBuf::from("/tmp/meeting"),
+            language: String::new(),
             diarization: RecordingDiarization {
                 enabled: true,
                 expected_speakers: Some(2),

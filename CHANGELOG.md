@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2026.8.26-beta.1 — 2026-08-26
+
 ### Fixed
 
 - Preserve and recover a completed transcript when optional diarization is interrupted or disabled.
@@ -16,6 +18,7 @@
 - Show the transcription backend and model at the top of new transcript files.
 - Show the configured backend and model before re-transcribing a recording.
 - Identify the selected model in the live transcription status.
+- Choose a transient transcription language with `l` during recording or before re-transcribing a meeting.
 
 ## 2026.8.24-beta.5 — 2026-08-24
 

@@ -128,7 +128,11 @@ impl SettingsModal {
         self.draft.transcription.model = model;
     }
     pub fn language_options(&self) -> Vec<(String, String)> {
-        let languages = match self.draft.transcription.backend {
+        Self::language_options_for_backend(self.draft.transcription.backend)
+    }
+
+    pub fn language_options_for_backend(backend: TranscriptionBackend) -> Vec<(String, String)> {
+        let languages = match backend {
             TranscriptionBackend::Parakeet => PARAKEET_LANGUAGES,
             TranscriptionBackend::Whisper => WHISPER_LANGUAGES,
         };
@@ -136,7 +140,7 @@ impl SettingsModal {
         options.extend(
             languages
                 .iter()
-                .map(|code| ((*code).to_owned(), language(code))),
+                .map(|code| ((*code).to_owned(), language_name(code))),
         );
         options
     }
@@ -233,7 +237,7 @@ impl SettingsModal {
                     Field::Microphone => on_off(self.draft.audio.mic).to_owned(),
                     Field::SystemLevel => gain(self.draft.audio.system_gain_db),
                     Field::MicrophoneLevel => gain(self.draft.audio.mic_gain_db),
-                    Field::Language => language(&self.draft.transcription.language).to_owned(),
+                    Field::Language => language_name(&self.draft.transcription.language),
                     Field::Diarization => on_off(self.draft.diarization.enabled).to_owned(),
                     Field::ExpectedSpeakers => expected_speakers(&self.draft.diarization),
                     Field::Engine => match self.draft.transcription.backend {
@@ -350,7 +354,7 @@ fn cycle_expected_speakers(config: &mut crate::config::DiarizationConfig, revers
     config.max_speakers = next;
 }
 
-fn language(value: &str) -> String {
+pub fn language_name(value: &str) -> String {
     let name = match value {
         "" => return "Auto".to_owned(),
         "en" => "English",

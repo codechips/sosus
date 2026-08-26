@@ -118,6 +118,9 @@ enum Command {
         /// Re-run transcription even if the saved pipeline has completed it.
         #[arg(long)]
         force: bool,
+        /// Override the language; omit for automatic detection.
+        #[arg(long)]
+        language: Option<String>,
         /// Skip speaker diarization for this invocation.
         #[arg(long)]
         no_diarize: bool,
@@ -179,6 +182,7 @@ pub async fn run() -> anyhow::Result<()> {
         Some(Command::Resume {
             ref meeting,
             force,
+            ref language,
             no_diarize,
             speakers,
             min_speakers,
@@ -191,7 +195,16 @@ pub async fn run() -> anyhow::Result<()> {
                 }
                 None => (min_speakers, max_speakers),
             };
-            run_resume(&cli, meeting, force, no_diarize, min_speakers, max_speakers).await
+            run_resume(
+                &cli,
+                meeting,
+                force,
+                language.clone(),
+                no_diarize,
+                min_speakers,
+                max_speakers,
+            )
+            .await
         }
         Some(Command::Import { ref file }) => {
             run_transcribe(
@@ -269,6 +282,7 @@ async fn run_resume(
     cli: &Cli,
     meeting: &Path,
     force: bool,
+    language: Option<String>,
     no_diarize: bool,
     min_speakers: Option<usize>,
     max_speakers: Option<usize>,
@@ -279,6 +293,7 @@ async fn run_resume(
         config_path: cli.config.clone(),
         data_dir: cli.data_dir.clone(),
         output_dir: cli.output_dir.clone(),
+        language: language.clone(),
         ..config::ConfigOverrides::default()
     };
     let effective = config::load_effective(
@@ -342,7 +357,7 @@ async fn run_resume(
         TranscribeInvocation {
             file: &audio_path,
             backend: None,
-            language: None,
+            language,
             threads: None,
             no_diarize,
             min_speakers,
@@ -1120,6 +1135,7 @@ mod tests {
             .is_err()
         );
         assert!(Cli::try_parse_from(["sosus", "resume", "meeting", "--speakers", "2",]).is_ok());
+        assert!(Cli::try_parse_from(["sosus", "resume", "meeting", "--language", "sv"]).is_ok());
     }
 
     #[test]
