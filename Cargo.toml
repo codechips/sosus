@@ -1,6 +1,6 @@
 [package]
 name = "sosus"
-version = "2026.8.26-beta.1"
+version = "2026.8.26-beta.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -42,7 +42,7 @@ whisper-rs = { git = "https://github.com/codechips/whisper-rs", rev = "5003449",
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6.2", default-features = false, features = ["alloc"] }
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
-objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["AVAudioApplication", "block2"] }
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["AVAudioApplication", "AVAudioPlayer", "block2"] }
 objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware", "objc2", "objc2-foundation"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFDictionary", "CFString"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSUUID", "NSValue"] }

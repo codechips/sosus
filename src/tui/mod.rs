@@ -121,6 +121,8 @@ struct App {
     selected_meeting: usize,
     transcript: Vec<Segment>,
     transcript_scroll: u16,
+    selected_transcript_segment: usize,
+    preview: Option<AudioPreview>,
     input_levels: Option<(f32, f32)>,
     sidebar_width: u16,
     resizing_sidebar: bool,
@@ -160,6 +162,8 @@ impl App {
             selected_meeting: 0,
             transcript: Vec::new(),
             transcript_scroll: 0,
+            selected_transcript_segment: 0,
+            preview: None,
             input_levels: None,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             resizing_sidebar: false,
@@ -211,6 +215,115 @@ impl App {
             })
             .unwrap_or_default();
         self.transcript_scroll = 0;
+        self.selected_transcript_segment = 0;
+    }
+
+    fn toggle_preview(&mut self) {
+        let Some(meeting) = self.meetings.get(self.selected_meeting) else {
+            self.message = Some("Choose a recording to preview".to_owned());
+            return;
+        };
+        let Some(path) = archive::recording_path(&meeting.path) else {
+            self.error = Some("Recording file was not found".to_owned());
+            return;
+        };
+        if let Some(preview) = &mut self.preview {
+            if preview.meeting_path == meeting.path {
+                match preview.toggle() {
+                    Ok(()) => return,
+                    Err(error) => {
+                        self.error = Some(error.to_string());
+                        self.preview = None;
+                        return;
+                    }
+                }
+            }
+            preview.stop();
+        }
+        match AudioPreview::start(path, meeting.path.clone(), meeting.name.clone()) {
+            Ok(preview) => self.preview = Some(preview),
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
+    fn stop_preview(&mut self) {
+        if let Some(preview) = self.preview.take() {
+            preview.stop();
+        }
+    }
+
+    fn skip_preview(&mut self, seconds: f64) {
+        if let Some(preview) = &mut self.preview {
+            preview.skip(seconds);
+            self.follow_preview();
+        }
+    }
+
+    fn play_selected_segment(&mut self) {
+        let Some(segment) = self.transcript.get(self.selected_transcript_segment) else {
+            return;
+        };
+        let position = segment.start_s;
+        let selected_path = self
+            .meetings
+            .get(self.selected_meeting)
+            .map(|meeting| meeting.path.clone());
+        if self
+            .preview
+            .as_ref()
+            .is_none_or(|preview| Some(&preview.meeting_path) != selected_path.as_ref())
+        {
+            self.toggle_preview();
+        }
+        if let Some(preview) = &mut self.preview {
+            preview.seek(position);
+            if let Err(error) = preview.play() {
+                self.error = Some(error.to_string());
+                self.preview = None;
+            }
+        }
+    }
+
+    fn move_transcript_selection(&mut self, delta: isize) {
+        if self.transcript.is_empty() {
+            return;
+        }
+        let last = self.transcript.len() - 1;
+        self.selected_transcript_segment = if delta.is_negative() {
+            self.selected_transcript_segment
+                .saturating_sub(delta.unsigned_abs())
+        } else {
+            (self.selected_transcript_segment + delta as usize).min(last)
+        };
+        self.transcript_scroll = (self.selected_transcript_segment.saturating_mul(3))
+            .try_into()
+            .unwrap_or(u16::MAX);
+    }
+
+    fn follow_preview(&mut self) {
+        let Some(preview) = &self.preview else {
+            return;
+        };
+        let position = preview.position_seconds();
+        if let Some(index) = self
+            .transcript
+            .iter()
+            .position(|segment| segment.start_s <= position && position < segment.end_s)
+        {
+            self.selected_transcript_segment = index;
+            self.transcript_scroll = (index.saturating_mul(3)).try_into().unwrap_or(u16::MAX);
+        }
+    }
+
+    fn update_preview(&mut self) {
+        let Some(preview) = &self.preview else {
+            return;
+        };
+        if preview.is_playing() {
+            self.follow_preview();
+        } else if preview.finished() {
+            self.preview = None;
+        }
     }
 
     fn meeting_row_at(&self, row: u16, terminal_height: u16) -> Option<usize> {
@@ -406,6 +519,36 @@ impl App {
             return None;
         }
 
+        if self.preview.is_some() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('p'), _) => {
+                    self.toggle_preview();
+                    return None;
+                }
+                (KeyCode::Char('x') | KeyCode::Esc, _) => {
+                    self.stop_preview();
+                    return None;
+                }
+                (KeyCode::Left, KeyModifiers::SHIFT) => {
+                    self.skip_preview(-30.0);
+                    return None;
+                }
+                (KeyCode::Right, KeyModifiers::SHIFT) => {
+                    self.skip_preview(30.0);
+                    return None;
+                }
+                (KeyCode::Left, _) => {
+                    self.skip_preview(-5.0);
+                    return None;
+                }
+                (KeyCode::Right, _) => {
+                    self.skip_preview(5.0);
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         match (key.code, key.modifiers) {
             (KeyCode::Up | KeyCode::Char('k'), _) if self.focus == Focus::Meetings => {
                 self.move_selection(-1);
@@ -414,10 +557,13 @@ impl App {
                 self.move_selection(1);
             }
             (KeyCode::Up | KeyCode::Char('k'), _) if self.focus == Focus::Transcript => {
-                self.transcript_scroll = self.transcript_scroll.saturating_sub(1);
+                self.move_transcript_selection(-1);
             }
             (KeyCode::Down | KeyCode::Char('j'), _) if self.focus == Focus::Transcript => {
-                self.transcript_scroll = self.transcript_scroll.saturating_add(1);
+                self.move_transcript_selection(1);
+            }
+            (KeyCode::Enter, _) if self.focus == Focus::Transcript => {
+                self.play_selected_segment();
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) if self.recording.is_some() => {
                 return Some(AppAction::StopRecording);
@@ -436,6 +582,9 @@ impl App {
             (KeyCode::Char('r'), _) if self.reconnecting.is_some() => {}
             (KeyCode::Char('r'), _) => return Some(AppAction::ToggleRecording),
             (KeyCode::Char('m'), _) => return microphone_mute_action(self.recording.is_some()),
+            (KeyCode::Char('p'), _) if self.recording.is_none() && !self.pipeline_active => {
+                self.toggle_preview();
+            }
             (KeyCode::Char('s'), _) if self.recording.is_some() => {
                 if let Some(active) = &mut self.recording {
                     active.diarization.cycle_expected_speakers();
@@ -664,6 +813,7 @@ impl App {
     }
 
     async fn start_recording(&mut self) -> anyhow::Result<()> {
+        self.stop_preview();
         let context = self
             .recording_context
             .as_ref()
@@ -897,7 +1047,7 @@ impl App {
         render_header_bar(frame, area);
         let sidebar_width = self.clamped_sidebar_width(area.width);
 
-        let (columns, recording_area) = if self.recording.is_some() {
+        let (columns, recording_area, preview_area) = if self.recording.is_some() {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 // Keep the recording controls in a compact, predictable lower pane. A
@@ -912,7 +1062,20 @@ impl App {
                     Constraint::Min(MINIMUM_TRANSCRIPT_WIDTH),
                 ])
                 .split(rows[0]);
-            (columns, Some(rows[1]))
+            (columns, Some(rows[1]), None)
+        } else if self.preview.is_some() {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(8), Constraint::Length(1)])
+                .split(content_area);
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(sidebar_width),
+                    Constraint::Min(MINIMUM_TRANSCRIPT_WIDTH),
+                ])
+                .split(rows[0]);
+            (columns, None, Some(rows[1]))
         } else {
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
@@ -921,7 +1084,7 @@ impl App {
                     Constraint::Min(MINIMUM_TRANSCRIPT_WIDTH),
                 ])
                 .split(content_area);
-            (columns, None)
+            (columns, None, None)
         };
 
         panes::meetings::render(
@@ -937,6 +1100,13 @@ impl App {
             self.focus == Focus::Transcript,
             &self.transcript,
             self.transcript_scroll,
+            self.preview.as_ref().and_then(|preview| {
+                self.transcript.iter().position(|segment| {
+                    segment.start_s <= preview.position_seconds()
+                        && preview.position_seconds() < segment.end_s
+                })
+            }),
+            (!self.transcript.is_empty()).then_some(self.selected_transcript_segment),
         );
         if let Some(recording_area) = recording_area {
             panes::recording::render(
@@ -952,6 +1122,11 @@ impl App {
                     .as_ref()
                     .is_some_and(|active| active.session.microphone_muted()),
             );
+        }
+        if let Some(preview_area) = preview_area {
+            if let Some(preview) = &self.preview {
+                render_preview_bar(frame, preview_area, preview);
+            }
         }
 
         if let Some(error) = &self.error {
@@ -1100,6 +1275,80 @@ struct ActiveRecording {
     diarization: RecordingDiarization,
 }
 
+struct AudioPreview {
+    player: audio::PreviewPlayer,
+    meeting_path: PathBuf,
+    meeting_name: String,
+    paused: bool,
+}
+
+impl AudioPreview {
+    fn start(
+        recording_path: PathBuf,
+        meeting_path: PathBuf,
+        meeting_name: String,
+    ) -> Result<Self, audio::PreviewError> {
+        let player = audio::PreviewPlayer::open(&recording_path)?;
+        player.play()?;
+        Ok(Self {
+            player,
+            meeting_path,
+            meeting_name,
+            paused: false,
+        })
+    }
+
+    fn toggle(&mut self) -> Result<(), audio::PreviewError> {
+        if self.paused {
+            self.play()
+        } else {
+            self.player.pause();
+            self.paused = true;
+            Ok(())
+        }
+    }
+
+    fn play(&mut self) -> Result<(), audio::PreviewError> {
+        self.player.play()?;
+        self.paused = false;
+        Ok(())
+    }
+
+    fn stop(&self) {
+        self.player.stop();
+    }
+
+    fn seek(&mut self, seconds: f64) {
+        self.player.seek(seconds);
+    }
+
+    fn skip(&mut self, seconds: f64) {
+        self.seek(self.position_seconds() + seconds);
+    }
+
+    fn position_seconds(&self) -> f64 {
+        self.player.position_seconds()
+    }
+
+    fn duration_seconds(&self) -> f64 {
+        self.player.duration_seconds()
+    }
+
+    fn is_playing(&self) -> bool {
+        self.player.is_playing()
+    }
+
+    fn finished(&self) -> bool {
+        !self.paused && self.position_seconds() >= self.duration_seconds() - 0.1
+    }
+}
+
+impl Drop for AudioPreview {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RecordingDiarization {
     enabled: bool,
@@ -1246,6 +1495,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                     app.processing_spinner_frame =
                         (app.processing_spinner_frame + 1) % PROCESSING_DOTS.len();
                 }
+                app.update_preview();
                 if let Err(error) = app.pump_recording() {
                     let finalize_result = app.stop_recording();
                     let finalized = finalize_result
@@ -1802,6 +2052,9 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("s                Change expected speakers while recording"),
         Line::from("l                Choose transcription language"),
         Line::from("t                Process / re-transcribe selected recording"),
+        Line::from("p / x            Play or pause / stop selected recording"),
+        Line::from("← / →            Skip 5s (Shift: 30s) while previewing"),
+        Line::from("Enter             Play selected transcript segment"),
         Line::from("o                Open selected recording in Finder"),
         Line::from("d / D            Delete with confirmation / immediately"),
         Line::from("?                Toggle help"),
@@ -2130,6 +2383,49 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
+fn render_preview_bar(frame: &mut Frame<'_>, area: Rect, preview: &AudioPreview) {
+    let icon = if preview.is_playing() { "▶" } else { "Ⅱ" };
+    let position = format_playback_time(preview.position_seconds());
+    let duration = format_playback_time(preview.duration_seconds());
+    let fixed_width = preview.meeting_name.chars().count() + position.len() + duration.len() + 14;
+    let meter_width = usize::from(area.width)
+        .saturating_sub(fixed_width)
+        .clamp(8, 48);
+    let filled = (preview.position_seconds() / preview.duration_seconds().max(0.1)
+        * meter_width as f64)
+        .round() as usize;
+    let meter = format!(
+        "{}{}",
+        "▰".repeat(filled.min(meter_width)),
+        "▱".repeat(meter_width - filled.min(meter_width))
+    );
+    let line = Line::from(vec![
+        Span::styled(format!(" {icon} "), theme::meter_signal()),
+        Span::styled(
+            format!("{position} / {duration}  "),
+            theme::secondary_text(),
+        ),
+        Span::styled(meter, theme::meter_signal()),
+        Span::styled(
+            format!("  {}", preview.meeting_name),
+            theme::secondary_text(),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line).style(theme::status_bar()), area);
+}
+
+fn format_playback_time(seconds: f64) -> String {
+    let total = seconds.max(0.0).round() as u64;
+    let hours = total / 3_600;
+    let minutes = (total % 3_600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
 fn render_header_bar(frame: &mut Frame<'_>, area: Rect) {
     let header_area = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(Paragraph::new("").style(theme::status_bar()), header_area);
@@ -2193,6 +2489,37 @@ mod tests {
         assert_eq!(app.focus, Focus::Meetings);
         let _ = app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(app.focus, Focus::Recording);
+    }
+
+    #[test]
+    fn transcript_navigation_selects_a_segment_and_keeps_it_visible() {
+        let mut app = app();
+        app.transcript = vec![
+            Segment {
+                start_s: 0.0,
+                end_s: 1.0,
+                speaker: None,
+                text: "first".to_owned(),
+            },
+            Segment {
+                start_s: 1.0,
+                end_s: 2.0,
+                speaker: None,
+                text: "second".to_owned(),
+            },
+        ];
+
+        app.move_transcript_selection(1);
+
+        assert_eq!(app.selected_transcript_segment, 1);
+        assert_eq!(app.transcript_scroll, 3);
+    }
+
+    #[test]
+    fn playback_time_is_compact_and_human_readable() {
+        assert_eq!(format_playback_time(4.0), "00:04");
+        assert_eq!(format_playback_time(125.0), "02:05");
+        assert_eq!(format_playback_time(3_726.0), "1:02:06");
     }
 
     #[test]

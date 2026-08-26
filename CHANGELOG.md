@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2026.8.26-beta.2 — 2026-08-26
+
+### Added
+
+- Preview recordings in the TUI with playback, pause, stopping, skipping, and transcript-position seeking.
+
 ## 2026.8.26-beta.1 — 2026-08-26
 
 ### Fixed

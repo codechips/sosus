@@ -10,7 +10,15 @@ use ratatui::{
 use crate::archive::Segment;
 use crate::tui::theme;
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, focused: bool, segments: &[Segment], scroll: u16) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focused: bool,
+    segments: &[Segment],
+    scroll: u16,
+    active_segment: Option<usize>,
+    selected_segment: Option<usize>,
+) {
     if segments.is_empty() {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -33,13 +41,29 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, focused: bool, segments: &[Segm
         return;
     }
     let mut lines = Vec::new();
-    for segment in segments.iter().take(100) {
+    for (index, segment) in segments.iter().take(100).enumerate() {
         let speaker = segment.speaker.as_deref().unwrap_or("Unknown");
+        let style = if Some(index) == active_segment {
+            theme::meter_signal()
+        } else if Some(index) == selected_segment && focused {
+            theme::selected_row()
+        } else {
+            theme::secondary_text()
+        };
         lines.push(Line::styled(
             format!("{}  {speaker}", timestamp(segment.start_s)),
-            theme::secondary_text(),
+            style,
         ));
-        lines.push(Line::styled(segment.text.clone(), theme::primary_text()));
+        lines.push(Line::styled(
+            segment.text.clone(),
+            if Some(index) == active_segment {
+                theme::primary_text()
+            } else if Some(index) == selected_segment && focused {
+                theme::selected_row()
+            } else {
+                theme::primary_text()
+            },
+        ));
         lines.push(Line::raw(""));
     }
     let body = Text::from(lines);
