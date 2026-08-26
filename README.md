@@ -8,6 +8,32 @@ The name nods to SOSUS, the historical *Sound Surveillance System*. Beginning in
 
 The connection is the idea of patient, local listening—not military surveillance. sosus records only when you start it, on your Mac, for your own meetings. No cloud, no hidden capture, and no database watching in the background.
 
+## Install
+
+Every release ships a signed and notarized arm64 binary. Releases are currently
+beta only, so `gh release view` and the `releases/latest` API endpoint do not
+resolve; list the releases and take the newest instead.
+
+```sh
+tag=$(gh release list -R codechips/sosus --limit 1 --json tagName --jq '.[0].tagName')
+gh release download "$tag" -R codechips/sosus -D .
+shasum -a 256 -c sosus-*-macos-arm64.zip.sha256
+unzip sosus-*-macos-arm64.zip
+install -m 755 release/sosus ~/bin/sosus
+```
+
+Checksums from releases up to and including `2026.8.26-beta.1` record an
+absolute build path and cannot be checked with `shasum -c`; for those, compare
+the hash column by hand.
+
+Confirm the signature before first use:
+
+```sh
+spctl -a -vvv -t install ~/bin/sosus
+```
+
+It should report `source=Notarized Developer ID`.
+
 ## Run
 
 Requires macOS on Apple silicon, [Mise](https://mise.jdx.dev/), and the capture permissions macOS requests on first use.

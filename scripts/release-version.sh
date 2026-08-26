@@ -17,8 +17,8 @@ fail() {
 }
 
 [ -n "$VERSION" ] || fail "could not read the package version from Cargo.toml"
-if ! [[ "$VERSION" =~ ^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-beta\.[1-9][0-9]*|-r[2-9][0-9]*)?$ ]]; then
-    fail "version must use YYYY.M.D, YYYY.M.D-beta.N, or YYYY.M.D-rN"
+if ! [[ "$VERSION" =~ ^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-beta\.[1-9][0-9]*)?$ ]]; then
+    fail "version must use YYYY.M.D or YYYY.M.D-beta.N"
 fi
 
 DATE=${VERSION%%-*}

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+
+- Record release checksums with a bare archive name so `shasum -c` verifies a downloaded artifact instead of failing on the build machine's absolute path.
+
+### Changed
+
+- Drop the `YYYY.M.D-rN` same-day revision version. A corrected build takes the next calendar date, because a hyphen suffix sorts below the plain version under SemVer precedence.
+- Document installing the signed binary from a GitHub release, including the prerelease-aware way to resolve the newest tag.
+
 ## 2026.8.26-beta.1 — 2026-08-26
 
 ### Fixed
