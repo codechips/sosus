@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 2026.8.27-beta.1 — 2026-08-27
+
+
 ### Fixed
 
 - Format saved recording durations in the TUI as minutes or hours instead of raw seconds.
