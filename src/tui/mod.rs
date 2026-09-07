@@ -2529,7 +2529,7 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn microphone_status(name: Option<&str>, fallback: bool) -> String {
     let suffix = if fallback { " (default fallback)" } else { "" };
-    format!("Mic: {}{suffix}", name.unwrap_or("Unavailable"))
+    format!("{}{suffix}", name.unwrap_or("Microphone unavailable"))
 }
 
 fn selected_microphone_name(device_id: &str) -> Option<String> {
@@ -2730,13 +2730,13 @@ mod tests {
     fn microphone_status_names_the_default_input_or_reports_its_absence() {
         assert_eq!(
             microphone_status(Some("MacBook Pro Microphone"), false),
-            "Mic: MacBook Pro Microphone"
+            "MacBook Pro Microphone"
         );
         assert_eq!(
             microphone_status(Some("MacBook Pro Microphone"), true),
-            "Mic: MacBook Pro Microphone (default fallback)"
+            "MacBook Pro Microphone (default fallback)"
         );
-        assert_eq!(microphone_status(None, false), "Mic: Unavailable");
+        assert_eq!(microphone_status(None, false), "Microphone unavailable");
     }
 
     #[test]

@@ -6,6 +6,10 @@
 
 - Choose and save a microphone input directly from the TUI with `i`.
 
+### Changed
+
+- Keep the microphone name compact in the TUI status bar.
+
 ## 2026.9.7 — 2026-09-07
 
 
