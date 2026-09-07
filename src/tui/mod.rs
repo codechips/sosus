@@ -110,6 +110,7 @@ struct App {
     message: Option<String>,
     warnings: VecDeque<String>,
     microphone_name: Option<String>,
+    microphone_fallback: bool,
     recording_context: Option<RecordingStartup>,
     recording: Option<ActiveRecording>,
     interrupted_recording: Option<InterruptedRecording>,
@@ -131,6 +132,11 @@ struct App {
 
 impl App {
     fn new(startup: Startup) -> Self {
+        let microphone_device = startup
+            .settings
+            .as_ref()
+            .map(|settings| settings.config.audio.mic_device.clone())
+            .unwrap_or_default();
         Self {
             archive_dir: startup.archive_dir,
             error: None,
@@ -151,7 +157,8 @@ impl App {
             should_quit: false,
             message: None,
             warnings: startup.warnings.into(),
-            microphone_name: audio::default_microphone_name(),
+            microphone_name: selected_microphone_name(&microphone_device),
+            microphone_fallback: false,
             recording_context: startup.recording,
             recording: None,
             interrupted_recording: None,
@@ -487,6 +494,7 @@ impl App {
                 modals::picker::PickerAction::Cancel => self.picker = None,
                 modals::picker::PickerAction::Choose(value) => {
                     match picker.kind.clone() {
+                        PickerType::Microphone => self.select_microphone(value),
                         PickerType::SettingsLanguage => {
                             if let Some(settings) = &mut self.settings {
                                 settings.set_language(value);
@@ -608,6 +616,13 @@ impl App {
             }
             (KeyCode::Char('r'), _) if self.reconnecting.is_some() => {}
             (KeyCode::Char('r'), _) => return Some(AppAction::ToggleRecording),
+            (KeyCode::Char('i'), _) if self.recording.is_some() => {
+                self.message = Some(
+                    "Input changes apply to the next recording; stop this recording first"
+                        .to_owned(),
+                );
+            }
+            (KeyCode::Char('i'), _) => self.open_microphone_picker(),
             (KeyCode::Char('m'), _) => return microphone_mute_action(self.recording.is_some()),
             (KeyCode::Char('p'), _) if self.recording.is_none() && !self.pipeline_active => {
                 self.toggle_preview();
@@ -774,6 +789,60 @@ impl App {
         };
         self.settings = Some(modals::settings::SettingsModal::new(context.config.clone()));
     }
+
+    fn open_microphone_picker(&mut self) {
+        let Some(context) = &self.settings_context else {
+            self.error = Some("Settings are not configured for this session".to_owned());
+            return;
+        };
+        let default_name =
+            audio::default_microphone_name().unwrap_or_else(|| "Unavailable".to_owned());
+        let mut items = vec![(
+            String::new(),
+            "System Default".to_owned(),
+            format!("Currently: {default_name}"),
+        )];
+        match audio::input_devices() {
+            Ok(devices) => items.extend(
+                devices
+                    .into_iter()
+                    .map(|device| (device.id, device.name, String::new())),
+            ),
+            Err(error) => {
+                self.error = Some(format!("Could not list microphones: {error}"));
+                return;
+            }
+        }
+        self.picker = Some(PickerKind::new(
+            PickerType::Microphone,
+            "Input microphone",
+            items,
+            &context.config.audio.mic_device,
+        ));
+    }
+
+    fn select_microphone(&mut self, device_id: String) {
+        let Some(context) = &mut self.settings_context else {
+            self.error = Some("Settings are not configured for this session".to_owned());
+            return;
+        };
+        let mut config = context.config.clone();
+        config.audio.mic_device = device_id.clone();
+        match config::save_tui_settings(&context.config_path, &context.fingerprint, &config) {
+            Ok(fingerprint) => {
+                context.config = config;
+                context.fingerprint = fingerprint;
+                if let Some(recording) = &mut self.recording_context {
+                    recording.microphone_device = device_id.clone();
+                }
+                self.microphone_fallback = false;
+                self.microphone_name = selected_microphone_name(&device_id);
+                self.message =
+                    Some("Microphone selection saved · applies to the next recording".to_owned());
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
     fn open_language_picker(&mut self) {
         let Some(settings) = &self.settings else {
             return;
@@ -877,11 +946,15 @@ impl App {
             .context("recording is not configured")?;
         audio::ensure_capture_permissions().await?;
         let started_at = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-        let (meeting_dir, session) = audio::RecordingSession::start_new_meeting_with_mix_settings(
+        let (meeting_dir, session) = audio::RecordingSession::start_new_meeting_with_microphone(
             &context.app_paths,
             started_at,
             context.mix_settings,
+            &context.microphone_device,
         )?;
+        self.microphone_name = Some(session.microphone_name().to_owned());
+        self.microphone_fallback = session.microphone_selection_notice().is_some();
+        let microphone_notice = session.microphone_selection_notice().map(str::to_owned);
         let formats = session.source_formats();
         tracing::info!(
             event = "recording_started",
@@ -908,7 +981,7 @@ impl App {
         self.input_levels = Some((0.0, 0.0));
         self.interrupted_recording = None;
         self.reconnecting = None;
-        self.message = None;
+        self.message = microphone_notice;
         Ok(())
     }
 
@@ -1282,6 +1355,7 @@ pub struct Startup {
 pub struct RecordingStartup {
     pub app_paths: AppPaths,
     pub mix_settings: audio::MixSettings,
+    pub microphone_device: String,
     pub config_path: PathBuf,
 }
 
@@ -1301,6 +1375,7 @@ struct SettingsContext {
 
 #[derive(Clone)]
 enum PickerType {
+    Microphone,
     SettingsLanguage,
     Model,
     RecordingLanguage,
@@ -2113,6 +2188,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("r                Start / stop recording"),
         Line::from("c                Continue an interrupted recording"),
         Line::from("m                Mute / unmute microphone"),
+        Line::from("i                Choose microphone input"),
         Line::from("s                Change expected speakers while recording"),
         Line::from("l                Choose transcription language"),
         Line::from("t                Process / re-transcribe selected recording"),
@@ -2394,7 +2470,8 @@ fn render_retranscribe_speaker_picker(
 }
 
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let microphone_name = microphone_status(app.microphone_name.as_deref());
+    let microphone_name =
+        microphone_status(app.microphone_name.as_deref(), app.microphone_fallback);
     let status = if let Some(active) = &app.recording {
         let elapsed = active.session.elapsed_seconds() as u64;
         let microphone_status = if active.session.microphone_muted() {
@@ -2450,8 +2527,21 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
-fn microphone_status(name: Option<&str>) -> String {
-    format!("Mic: {}", name.unwrap_or("Unavailable"))
+fn microphone_status(name: Option<&str>, fallback: bool) -> String {
+    let suffix = if fallback { " (default fallback)" } else { "" };
+    format!("Mic: {}{suffix}", name.unwrap_or("Unavailable"))
+}
+
+fn selected_microphone_name(device_id: &str) -> Option<String> {
+    if device_id.is_empty() {
+        return audio::default_microphone_name();
+    }
+    audio::input_devices().ok().and_then(|devices| {
+        devices
+            .into_iter()
+            .find(|device| device.id == device_id)
+            .map(|device| device.name)
+    })
 }
 
 fn render_preview_bar(frame: &mut Frame<'_>, area: Rect, preview: &AudioPreview) {
@@ -2639,10 +2729,14 @@ mod tests {
     #[test]
     fn microphone_status_names_the_default_input_or_reports_its_absence() {
         assert_eq!(
-            microphone_status(Some("MacBook Pro Microphone")),
+            microphone_status(Some("MacBook Pro Microphone"), false),
             "Mic: MacBook Pro Microphone"
         );
-        assert_eq!(microphone_status(None), "Mic: Unavailable");
+        assert_eq!(
+            microphone_status(Some("MacBook Pro Microphone"), true),
+            "Mic: MacBook Pro Microphone (default fallback)"
+        );
+        assert_eq!(microphone_status(None, false), "Mic: Unavailable");
     }
 
     #[test]

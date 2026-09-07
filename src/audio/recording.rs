@@ -73,6 +73,7 @@ pub struct RecordingSession {
     microphone_peak: f32,
     echo_canceller: EchoCanceller,
     microphone_muted: bool,
+    microphone_selection_notice: Option<String>,
     mix_settings: MixSettings,
     limiter: LookaheadLimiter,
     elapsed_offset_seconds: f64,
@@ -81,14 +82,15 @@ pub struct RecordingSession {
 impl RecordingSession {
     /// Reserve a meeting folder and start recording, removing the reservation if capture cannot
     /// be initialized. This prevents failed starts from appearing as empty recordings.
-    pub fn start_new_meeting_with_mix_settings(
+    pub fn start_new_meeting_with_microphone(
         app_paths: &AppPaths,
         started_at: OffsetDateTime,
         mix_settings: MixSettings,
+        microphone_device: &str,
     ) -> anyhow::Result<(PathBuf, Self)> {
         let meeting_dir = app_paths.create_meeting_dir(started_at)?;
         let recording_path = meeting_dir.join("recording.wav");
-        match Self::start_with_mix_settings(&recording_path, mix_settings) {
+        match Self::start_with_microphone(&recording_path, mix_settings, microphone_device) {
             Ok(session) => Ok((meeting_dir, session)),
             Err(error) => {
                 if let Err(cleanup_error) = remove_failed_meeting_dir(&meeting_dir) {
@@ -106,15 +108,17 @@ impl RecordingSession {
     }
 
     /// Start both required sources and create a new canonical WAV sink.
-    pub fn start_with_mix_settings(
+    pub fn start_with_microphone(
         path: impl AsRef<Path>,
         mix_settings: MixSettings,
+        microphone_device: &str,
     ) -> Result<Self, RecordingError> {
         let (system_capture, system_reader) = SystemAudioCapture::start_default()?;
-        let (microphone_capture, microphone_reader) = MicrophoneCapture::start_default()?;
+        let (microphone_capture, microphone_reader, microphone_selection_notice) =
+            MicrophoneCapture::start_preferred(microphone_device)?;
         let sink = RecordingWavSink::create(path)?;
 
-        Self::from_captures(
+        let mut session = Self::from_captures(
             system_capture,
             system_reader,
             microphone_capture,
@@ -122,7 +126,9 @@ impl RecordingSession {
             sink,
             mix_settings,
             0.0,
-        )
+        )?;
+        session.microphone_selection_notice = microphone_selection_notice;
+        Ok(session)
     }
 
     /// Rebuild capture and append it to a finalized Sosus WAV, preserving the interruption as
@@ -132,8 +138,18 @@ impl RecordingSession {
         mix_settings: MixSettings,
         interruption_seconds: f64,
     ) -> Result<Self, RecordingError> {
+        Self::continue_with_microphone(path, mix_settings, interruption_seconds, "")
+    }
+
+    pub fn continue_with_microphone(
+        path: impl AsRef<Path>,
+        mix_settings: MixSettings,
+        interruption_seconds: f64,
+        microphone_device: &str,
+    ) -> Result<Self, RecordingError> {
         let (system_capture, system_reader) = SystemAudioCapture::start_default()?;
-        let (microphone_capture, microphone_reader) = MicrophoneCapture::start_default()?;
+        let (microphone_capture, microphone_reader, microphone_selection_notice) =
+            MicrophoneCapture::start_preferred(microphone_device)?;
         let mut sink = RecordingWavSink::append(path)?;
         let elapsed_offset_seconds = sink.samples_written() as f64
             / f64::from(RECORDING_SAMPLE_RATE)
@@ -141,7 +157,7 @@ impl RecordingSession {
         let silence_samples =
             (interruption_seconds.max(0.0) * f64::from(RECORDING_SAMPLE_RATE)).round() as u64;
         sink.write_silence(silence_samples)?;
-        Self::from_captures(
+        let mut session = Self::from_captures(
             system_capture,
             system_reader,
             microphone_capture,
@@ -149,7 +165,9 @@ impl RecordingSession {
             sink,
             mix_settings,
             elapsed_offset_seconds,
-        )
+        )?;
+        session.microphone_selection_notice = microphone_selection_notice;
+        Ok(session)
     }
 
     fn from_captures(
@@ -187,10 +205,19 @@ impl RecordingSession {
             microphone_peak: 0.0,
             echo_canceller: EchoCanceller::default(),
             microphone_muted: false,
+            microphone_selection_notice: None,
             mix_settings,
             limiter: LookaheadLimiter::default(),
             elapsed_offset_seconds,
         })
+    }
+
+    pub fn microphone_name(&self) -> &str {
+        self.microphone_capture.name()
+    }
+
+    pub fn microphone_selection_notice(&self) -> Option<&str> {
+        self.microphone_selection_notice.as_deref()
     }
 
     /// Drain queued callback data, mix it, and append it to the WAV.

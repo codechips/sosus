@@ -929,13 +929,14 @@ async fn run_record(cli: &Cli) -> anyhow::Result<()> {
         .context("recording permissions are required")?;
 
     let started_at = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-    let (meeting_dir, mut session) = audio::RecordingSession::start_new_meeting_with_mix_settings(
+    let (meeting_dir, mut session) = audio::RecordingSession::start_new_meeting_with_microphone(
         &app_paths,
         started_at,
         audio::MixSettings::from_db(
             effective.effective.audio.system_gain_db,
             effective.effective.audio.mic_gain_db,
         ),
+        &effective.effective.audio.mic_device,
     )?;
     let formats = session.source_formats();
     tracing::info!(
@@ -1076,6 +1077,7 @@ async fn run_tui(cli: &Cli) -> anyhow::Result<()> {
                 effective.effective.audio.system_gain_db,
                 effective.effective.audio.mic_gain_db,
             ),
+            microphone_device: effective.effective.audio.mic_device.clone(),
             config_path: effective.locations.config_path.clone(),
         }),
         settings: Some(crate::tui::SettingsStartup {

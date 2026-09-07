@@ -622,6 +622,7 @@ pub fn save_tui_settings(
         .map_err(|error| invalid("<document>", error.to_string()))?;
     let audio = table_mut(&mut document, "audio");
     audio["mic"] = value(config.audio.mic);
+    audio["mic_device"] = value(config.audio.mic_device.clone());
     audio["system_gain_db"] = value(config.audio.system_gain_db);
     audio["mic_gain_db"] = value(config.audio.mic_gain_db);
 
@@ -935,6 +936,7 @@ mod tests {
         let expected = fingerprint(&path).unwrap();
         let mut config = load(&path).unwrap().config;
         config.audio.mic = false;
+        config.audio.mic_device = "Built-in Microphone".to_owned();
         config.output.json = true;
 
         let saved = save_tui_settings(&path, &expected, &config).unwrap();
@@ -943,6 +945,7 @@ mod tests {
         assert!(contents.contains("[custom]"));
         assert!(contents.contains("answer = 42"));
         assert!(contents.contains("mic = false"));
+        assert!(contents.contains("mic_device = \"Built-in Microphone\""));
         assert!(contents.contains("json = true"));
         assert!(contents.contains("min_speakers = 2"));
         assert!(contents.contains("max_speakers = 2"));

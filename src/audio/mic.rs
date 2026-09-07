@@ -24,6 +24,7 @@ pub struct MicrophoneCapture {
     _stream: Stream,
     sample_rate: u32,
     channels: u16,
+    name: String,
 }
 
 impl MicrophoneCapture {
@@ -33,6 +34,42 @@ impl MicrophoneCapture {
         let device = host
             .default_input_device()
             .ok_or(MicrophoneCaptureError::NoDefaultInputDevice)?;
+        Self::start_device(device)
+    }
+
+    /// Start a named microphone, falling back to the current system default when it is gone.
+    pub fn start_preferred(
+        device_id: &str,
+    ) -> Result<(Self, MicrophoneReader, Option<String>), MicrophoneCaptureError> {
+        if device_id.is_empty() {
+            let (capture, reader) = Self::start_default()?;
+            return Ok((capture, reader, None));
+        }
+        let host = cpal::default_host();
+        let device = find_input_device(&host, device_id)?;
+        match device {
+            Some(device) => match Self::start_device(device) {
+                Ok((capture, reader)) => Ok((capture, reader, None)),
+                Err(_) => Self::start_default_with_fallback_notice(),
+            },
+            None => Self::start_default_with_fallback_notice(),
+        }
+    }
+
+    fn start_default_with_fallback_notice()
+    -> Result<(Self, MicrophoneReader, Option<String>), MicrophoneCaptureError> {
+        let (capture, reader) = Self::start_default()?;
+        let message = format!(
+            "Selected microphone is unavailable; using system default ({})",
+            capture.name
+        );
+        Ok((capture, reader, Some(message)))
+    }
+
+    fn start_device(
+        device: cpal::Device,
+    ) -> Result<(Self, MicrophoneReader), MicrophoneCaptureError> {
+        let name = device_name(&device);
         let supported = device
             .default_input_config()
             .map_err(|source| MicrophoneCaptureError::DefaultInputConfig { source })?;
@@ -144,6 +181,7 @@ impl MicrophoneCapture {
             _stream: stream,
             sample_rate,
             channels,
+            name,
         };
         let reader = MicrophoneReader {
             consumer,
@@ -160,6 +198,32 @@ impl MicrophoneCapture {
     pub fn channels(&self) -> u16 {
         self.channels
     }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InputDevice {
+    pub id: String,
+    pub name: String,
+}
+
+pub fn input_devices() -> Result<Vec<InputDevice>, MicrophoneCaptureError> {
+    let host = cpal::default_host();
+    let mut devices = host
+        .input_devices()
+        .map_err(|source| MicrophoneCaptureError::EnumerateDevices { source })?
+        .filter_map(|device| {
+            device.id().ok().map(|id| InputDevice {
+                id: id.id().to_owned(),
+                name: device_name(&device),
+            })
+        })
+        .collect::<Vec<_>>();
+    devices.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(devices)
 }
 
 /// Return the name of the input device macOS currently uses by default.
@@ -168,6 +232,22 @@ pub fn default_microphone_name() -> Option<String> {
         .default_input_device()
         .map(|device| device.to_string())
         .filter(|name| !name.trim().is_empty())
+}
+
+fn find_input_device(
+    host: &cpal::Host,
+    device_id: &str,
+) -> Result<Option<cpal::Device>, MicrophoneCaptureError> {
+    host.input_devices()
+        .map_err(|source| MicrophoneCaptureError::EnumerateDevices { source })
+        .map(|mut devices| devices.find(|device| device.id().is_ok_and(|id| id.id() == device_id)))
+}
+
+fn device_name(device: &cpal::Device) -> String {
+    device
+        .description()
+        .map(|description| description.name().to_owned())
+        .unwrap_or_else(|_| "Unknown microphone".to_owned())
 }
 
 /// Non-real-time read side of the microphone queue.
@@ -253,6 +333,11 @@ fn push_interleaved_mono<T>(
 
 #[derive(Debug, Error)]
 pub enum MicrophoneCaptureError {
+    #[error("could not enumerate microphone devices")]
+    EnumerateDevices {
+        #[source]
+        source: cpal::Error,
+    },
     #[error("no default microphone is available")]
     NoDefaultInputDevice,
     #[error("could not read the default microphone format")]
