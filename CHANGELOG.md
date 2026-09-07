@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 2026.9.8 — 2026-09-08
+
+
 ### Added
 
 - Choose and save a microphone input directly from the TUI with `i`.
