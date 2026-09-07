@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 2026.9.7 — 2026-09-07
+
+
 ### Added
 
 - Show the macOS default microphone in the TUI status bar.
