@@ -171,11 +171,22 @@ impl App {
     }
 
     fn refresh_archive(&mut self) {
+        self.refresh_archive_select(None);
+    }
+
+    fn refresh_archive_select(&mut self, selected_path: Option<&Path>) {
         if let Ok(meetings) = archive::discover(std::path::Path::new(&self.archive_dir)) {
             self.meetings = meetings;
-            self.selected_meeting = self
-                .selected_meeting
-                .min(self.meetings.len().saturating_sub(1));
+            self.selected_meeting = selected_path
+                .and_then(|path| {
+                    self.meetings
+                        .iter()
+                        .position(|meeting| meeting.path == path)
+                })
+                .unwrap_or_else(|| {
+                    self.selected_meeting
+                        .min(self.meetings.len().saturating_sub(1))
+                });
             self.load_selected_transcript();
         }
     }
@@ -1142,14 +1153,21 @@ impl App {
             columns[1],
             self.focus == Focus::Transcript,
             &self.transcript,
-            self.transcript_scroll,
-            self.preview.as_ref().and_then(|preview| {
-                self.transcript.iter().position(|segment| {
-                    segment.start_s <= preview.position_seconds()
-                        && preview.position_seconds() < segment.end_s
-                })
-            }),
-            (!self.transcript.is_empty()).then_some(self.selected_transcript_segment),
+            panes::transcript::RenderState {
+                scroll: self.transcript_scroll,
+                active_segment: self.preview.as_ref().and_then(|preview| {
+                    self.transcript.iter().position(|segment| {
+                        segment.start_s <= preview.position_seconds()
+                            && preview.position_seconds() < segment.end_s
+                    })
+                }),
+                selected_segment: (!self.transcript.is_empty())
+                    .then_some(self.selected_transcript_segment),
+                processing_status: self
+                    .pipeline_active
+                    .then_some(self.pipeline_status.as_deref())
+                    .flatten(),
+            },
         );
         if let Some(recording_area) = recording_area {
             panes::recording::render(
@@ -1585,6 +1603,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                             Some(AppAction::ToggleRecording) if app.recording.is_some() => {
                                 match app.stop_recording() {
                                     Ok(Some(recording)) => {
+                                        app.refresh_archive_select(Some(&recording.meeting_dir));
                                         launch_pipeline(
                                             &mut app,
                                             recording.path,
@@ -1618,6 +1637,7 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                             Some(AppAction::StopRecording) => {
                                 match app.stop_recording() {
                                     Ok(Some(recording)) => {
+                                        app.refresh_archive_select(Some(&recording.meeting_dir));
                                         launch_pipeline(
                                             &mut app,
                                             recording.path,
@@ -2604,6 +2624,37 @@ mod tests {
         assert_eq!(format_recording_duration(42.0), "42s");
         assert_eq!(format_recording_duration(1_576.6), "26m 17s");
         assert_eq!(format_recording_duration(3_726.0), "1h 02m");
+    }
+
+    #[test]
+    fn refreshing_after_recording_selects_the_new_meeting() {
+        let root = std::env::temp_dir().join(format!(
+            "sosus-tui-refresh-test-{}",
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let meeting_dir = root.join("2026-09-07_1200");
+        fs::create_dir_all(&meeting_dir).unwrap();
+        hound::WavWriter::create(
+            meeting_dir.join("recording.wav"),
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap()
+        .finalize()
+        .unwrap();
+
+        let mut app = app();
+        app.archive_dir = root.display().to_string();
+        app.refresh_archive_select(Some(&meeting_dir));
+
+        assert_eq!(app.meetings.len(), 1);
+        assert_eq!(app.selected_meeting, 0);
+        assert_eq!(app.meetings[app.selected_meeting].path, meeting_dir);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

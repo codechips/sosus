@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Show a newly stopped recording in the TUI immediately, with its live transcription or diarization status in the reader pane.
+
 ## 2026.8.27-beta.1 — 2026-08-27
 
 
