@@ -162,6 +162,14 @@ impl MicrophoneCapture {
     }
 }
 
+/// Return the name of the input device macOS currently uses by default.
+pub fn default_microphone_name() -> Option<String> {
+    cpal::default_host()
+        .default_input_device()
+        .map(|device| device.to_string())
+        .filter(|name| !name.trim().is_empty())
+}
+
 /// Non-real-time read side of the microphone queue.
 pub struct MicrophoneReader {
     consumer: Consumer<f32>,

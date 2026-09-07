@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Show the macOS default microphone in the TUI status bar.
+
 ### Changed
 
 - Show a newly stopped recording in the TUI immediately, with its live transcription or diarization status in the reader pane.

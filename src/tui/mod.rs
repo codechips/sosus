@@ -109,6 +109,7 @@ struct App {
     should_quit: bool,
     message: Option<String>,
     warnings: VecDeque<String>,
+    microphone_name: Option<String>,
     recording_context: Option<RecordingStartup>,
     recording: Option<ActiveRecording>,
     interrupted_recording: Option<InterruptedRecording>,
@@ -150,6 +151,7 @@ impl App {
             should_quit: false,
             message: None,
             warnings: startup.warnings.into(),
+            microphone_name: audio::default_microphone_name(),
             recording_context: startup.recording,
             recording: None,
             interrupted_recording: None,
@@ -868,6 +870,7 @@ impl App {
 
     async fn start_recording(&mut self) -> anyhow::Result<()> {
         self.stop_preview();
+        self.microphone_name = audio::default_microphone_name();
         let context = self
             .recording_context
             .as_ref()
@@ -2391,6 +2394,7 @@ fn render_retranscribe_speaker_picker(
 }
 
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let microphone_name = microphone_status(app.microphone_name.as_deref());
     let status = if let Some(active) = &app.recording {
         let elapsed = active.session.elapsed_seconds() as u64;
         let microphone_status = if active.session.microphone_muted() {
@@ -2406,7 +2410,7 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Line::from(vec![
             Span::styled(" ●", theme::recording_indicator()),
             Span::raw(format!(
-                " Recording  {:02}:{:02}  ·  r to stop {microphone_status}{speaker_status}",
+                " Recording  {:02}:{:02}  ·  {microphone_name}  ·  r to stop {microphone_status}{speaker_status}",
                 elapsed / 60,
                 elapsed % 60
             )),
@@ -2418,10 +2422,10 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     format!(" {}", PROCESSING_DOTS[app.processing_spinner_frame]),
                     theme::meter_signal(),
                 ),
-                Span::raw(format!(" {stage}")),
+                Span::raw(format!(" {stage}  ·  {microphone_name}")),
             ])
         } else {
-            Line::from(format!(" {stage}"))
+            Line::from(format!(" {stage}  ·  {microphone_name}"))
         }
     } else if let Some(reconnecting) = &app.reconnecting {
         let elapsed = reconnecting.started_at.elapsed().as_secs();
@@ -2430,18 +2434,24 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 format!(" {}", PROCESSING_DOTS[app.processing_spinner_frame]),
                 theme::warning_text(),
             ),
-            Span::raw(format!(" Reconnecting audio… {elapsed}s")),
+            Span::raw(format!(
+                " Reconnecting audio… {elapsed}s  ·  {microphone_name}"
+            )),
         ])
     } else if let Some(message) = &app.message {
-        Line::from(format!(" {message}"))
+        Line::from(format!(" {message}  ·  {microphone_name}"))
     } else {
-        Line::from(" r to record")
+        Line::from(format!(" {microphone_name}  ·  r to record"))
     };
     let status_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     frame.render_widget(
         Paragraph::new(status).style(theme::status_bar()),
         status_area,
     );
+}
+
+fn microphone_status(name: Option<&str>) -> String {
+    format!("Mic: {}", name.unwrap_or("Unavailable"))
 }
 
 fn render_preview_bar(frame: &mut Frame<'_>, area: Rect, preview: &AudioPreview) {
@@ -2624,6 +2634,15 @@ mod tests {
         assert_eq!(format_recording_duration(42.0), "42s");
         assert_eq!(format_recording_duration(1_576.6), "26m 17s");
         assert_eq!(format_recording_duration(3_726.0), "1h 02m");
+    }
+
+    #[test]
+    fn microphone_status_names_the_default_input_or_reports_its_absence() {
+        assert_eq!(
+            microphone_status(Some("MacBook Pro Microphone")),
+            "Mic: MacBook Pro Microphone"
+        );
+        assert_eq!(microphone_status(None), "Mic: Unavailable");
     }
 
     #[test]
