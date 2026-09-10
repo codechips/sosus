@@ -977,6 +977,7 @@ impl App {
                     .as_ref()
                     .map(|context| &context.config),
             ),
+            microphone_change_notice: None,
         });
         self.input_levels = Some((0.0, 0.0));
         self.interrupted_recording = None;
@@ -1010,6 +1011,7 @@ impl App {
             meeting_dir: interrupted.meeting_dir.clone(),
             language: interrupted.language.clone(),
             diarization: interrupted.diarization,
+            microphone_change_notice: None,
         });
         self.input_levels = Some((0.0, 0.0));
         self.error = None;
@@ -1076,6 +1078,7 @@ impl App {
                     meeting_dir: reconnecting.interrupted.meeting_dir.clone(),
                     language: reconnecting.interrupted.language.clone(),
                     diarization: reconnecting.interrupted.diarization,
+                    microphone_change_notice: None,
                 });
                 self.input_levels = Some((0.0, 0.0));
                 self.message =
@@ -1129,6 +1132,15 @@ impl App {
         if let Some(active) = &mut self.recording {
             active.session.pump()?;
             self.input_levels = Some(active.session.input_levels());
+            if let Some(change) = active.session.take_microphone_change() {
+                let notice = format_microphone_change(&change, active.session.microphone_name());
+                tracing::info!(
+                    event = "recording_microphone_changed",
+                    change = ?change,
+                    recording_microphone = active.session.microphone_name(),
+                );
+                active.microphone_change_notice = Some(notice);
+            }
         }
         Ok(())
     }
@@ -1412,6 +1424,7 @@ struct ActiveRecording {
     meeting_dir: PathBuf,
     language: String,
     diarization: RecordingDiarization,
+    microphone_change_notice: Option<String>,
 }
 
 struct AudioPreview {
@@ -2484,10 +2497,15 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
         } else {
             String::new()
         };
+        let microphone_change = active
+            .microphone_change_notice
+            .as_deref()
+            .map(|notice| format!(" · {notice}"))
+            .unwrap_or_default();
         Line::from(vec![
             Span::styled(" ●", theme::recording_indicator()),
             Span::raw(format!(
-                " Recording  {:02}:{:02}  ·  {microphone_name}  ·  r to stop {microphone_status}{speaker_status}",
+                " Recording  {:02}:{:02}  ·  {microphone_name}  ·  r to stop {microphone_status}{speaker_status}{microphone_change}",
                 elapsed / 60,
                 elapsed % 60
             )),
@@ -2530,6 +2548,37 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn microphone_status(name: Option<&str>, fallback: bool) -> String {
     let suffix = if fallback { " (default fallback)" } else { "" };
     format!("{}{suffix}", name.unwrap_or("Microphone unavailable"))
+}
+
+fn format_microphone_change(
+    change: &audio::MicrophoneChange,
+    recording_microphone: &str,
+) -> String {
+    match change {
+        audio::MicrophoneChange::DefaultInput { previous, current } => {
+            let previous = previous.as_deref().unwrap_or("None");
+            let current = current.as_deref().unwrap_or("None");
+            format!(
+                "Default mic changed: {previous} → {current}; recording stays on {recording_microphone}"
+            )
+        }
+        audio::MicrophoneChange::Devices {
+            connected,
+            disconnected,
+        } => {
+            let mut changes = Vec::new();
+            if !connected.is_empty() {
+                changes.push(format!("connected: {}", connected.join(", ")));
+            }
+            if !disconnected.is_empty() {
+                changes.push(format!("disconnected: {}", disconnected.join(", ")));
+            }
+            format!(
+                "Microphones {}; recording stays on {recording_microphone}",
+                changes.join("; ")
+            )
+        }
+    }
 }
 
 fn selected_microphone_name(device_id: &str) -> Option<String> {
@@ -2737,6 +2786,34 @@ mod tests {
             "MacBook Pro Microphone (default fallback)"
         );
         assert_eq!(microphone_status(None, false), "Microphone unavailable");
+    }
+
+    #[test]
+    fn microphone_change_notice_names_both_defaults_and_the_retained_source() {
+        assert_eq!(
+            format_microphone_change(
+                &audio::MicrophoneChange::DefaultInput {
+                    previous: Some("MacBook Pro Microphone".to_owned()),
+                    current: Some("AirPods Microphone".to_owned()),
+                },
+                "MacBook Pro Microphone",
+            ),
+            "Default mic changed: MacBook Pro Microphone → AirPods Microphone; recording stays on MacBook Pro Microphone"
+        );
+    }
+
+    #[test]
+    fn microphone_change_notice_names_connected_devices() {
+        assert_eq!(
+            format_microphone_change(
+                &audio::MicrophoneChange::Devices {
+                    connected: vec!["EarPods Microphone".to_owned()],
+                    disconnected: Vec::new(),
+                },
+                "MacBook Pro Microphone",
+            ),
+            "Microphones connected: EarPods Microphone; recording stays on MacBook Pro Microphone"
+        );
     }
 
     #[test]

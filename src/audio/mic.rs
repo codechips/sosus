@@ -1,13 +1,23 @@
 //! Default-microphone capture behind a bounded real-time queue.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    ffi::c_void,
+    ptr::NonNull,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
 use cpal::{
     FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
+};
+use objc2_core_audio::{
+    AudioObjectAddPropertyListener, AudioObjectID, AudioObjectPropertyAddress,
+    AudioObjectRemovePropertyListener, kAudioHardwarePropertyDefaultInputDevice,
+    kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use thiserror::Error;
@@ -25,6 +35,172 @@ pub struct MicrophoneCapture {
     sample_rate: u32,
     channels: u16,
     name: String,
+}
+
+/// A microphone-related hardware change while a recording is in progress.
+///
+/// Sosus reports this separately from the capture stream so it never silently
+/// changes a recording's source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MicrophoneChange {
+    DefaultInput {
+        previous: Option<String>,
+        current: Option<String>,
+    },
+    Devices {
+        connected: Vec<String>,
+        disconnected: Vec<String>,
+    },
+}
+
+/// A Core Audio listener that does no work in its callback. The recorder
+/// resolves microphone names on its regular, non-real-time thread.
+pub(crate) struct DefaultInputMonitor {
+    state: Arc<DefaultInputMonitorState>,
+    default_input_address: AudioObjectPropertyAddress,
+    devices_address: AudioObjectPropertyAddress,
+    last_default: Option<String>,
+    last_input_devices: Vec<InputDevice>,
+}
+
+#[derive(Default)]
+struct DefaultInputMonitorState {
+    changed: AtomicBool,
+}
+
+impl DefaultInputMonitor {
+    pub(crate) fn start() -> Result<Self, i32> {
+        let default_input_address = AudioObjectPropertyAddress {
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain,
+        };
+        let devices_address = AudioObjectPropertyAddress {
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain,
+        };
+        let state = Arc::new(DefaultInputMonitorState::default());
+        let default_status = unsafe {
+            AudioObjectAddPropertyListener(
+                kAudioObjectSystemObject as AudioObjectID,
+                NonNull::from(&default_input_address),
+                Some(default_input_changed),
+                Arc::as_ptr(&state).cast_mut().cast::<c_void>(),
+            )
+        };
+        if default_status != 0 {
+            return Err(default_status);
+        }
+        let devices_status = unsafe {
+            AudioObjectAddPropertyListener(
+                kAudioObjectSystemObject as AudioObjectID,
+                NonNull::from(&devices_address),
+                Some(default_input_changed),
+                Arc::as_ptr(&state).cast_mut().cast::<c_void>(),
+            )
+        };
+        if devices_status != 0 {
+            unsafe {
+                AudioObjectRemovePropertyListener(
+                    kAudioObjectSystemObject as AudioObjectID,
+                    NonNull::from(&default_input_address),
+                    Some(default_input_changed),
+                    Arc::as_ptr(&state).cast_mut().cast::<c_void>(),
+                );
+            }
+            return Err(devices_status);
+        }
+        Ok(Self {
+            state,
+            default_input_address,
+            devices_address,
+            last_default: default_microphone_name(),
+            last_input_devices: input_devices().unwrap_or_default(),
+        })
+    }
+
+    pub(crate) fn take_change(&mut self) -> Option<MicrophoneChange> {
+        if !self.state.changed.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        let current = default_microphone_name();
+        let current_input_devices =
+            input_devices().unwrap_or_else(|_| self.last_input_devices.clone());
+        if current != self.last_default {
+            let previous = std::mem::replace(&mut self.last_default, current.clone());
+            self.last_input_devices = current_input_devices;
+            return Some(MicrophoneChange::DefaultInput { previous, current });
+        }
+        let connected = device_names_not_in(&current_input_devices, &self.last_input_devices);
+        let disconnected = device_names_not_in(&self.last_input_devices, &current_input_devices);
+        self.last_input_devices = current_input_devices;
+        (!connected.is_empty() || !disconnected.is_empty()).then_some(MicrophoneChange::Devices {
+            connected,
+            disconnected,
+        })
+    }
+}
+
+impl Drop for DefaultInputMonitor {
+    fn drop(&mut self) {
+        let status = unsafe {
+            AudioObjectRemovePropertyListener(
+                kAudioObjectSystemObject as AudioObjectID,
+                NonNull::from(&self.default_input_address),
+                Some(default_input_changed),
+                Arc::as_ptr(&self.state).cast_mut().cast::<c_void>(),
+            )
+        };
+        if status != 0 {
+            tracing::warn!(
+                event = "default_microphone_monitor_cleanup",
+                error_category = "core_audio_remove_listener",
+                os_status = status
+            );
+        }
+        let status = unsafe {
+            AudioObjectRemovePropertyListener(
+                kAudioObjectSystemObject as AudioObjectID,
+                NonNull::from(&self.devices_address),
+                Some(default_input_changed),
+                Arc::as_ptr(&self.state).cast_mut().cast::<c_void>(),
+            )
+        };
+        if status != 0 {
+            tracing::warn!(
+                event = "microphone_device_monitor_cleanup",
+                error_category = "core_audio_remove_listener",
+                os_status = status
+            );
+        }
+    }
+}
+
+fn device_names_not_in(devices: &[InputDevice], other: &[InputDevice]) -> Vec<String> {
+    devices
+        .iter()
+        .filter(|device| {
+            !other
+                .iter()
+                .any(|other_device| other_device.id == device.id)
+        })
+        .map(|device| device.name.clone())
+        .collect()
+}
+
+unsafe extern "C-unwind" fn default_input_changed(
+    _object: AudioObjectID,
+    _address_count: u32,
+    _addresses: NonNull<AudioObjectPropertyAddress>,
+    client_data: *mut c_void,
+) -> i32 {
+    // Core Audio supplies the pointer originally registered from the monitor's Arc.
+    let Some(state) = (unsafe { (client_data as *const DefaultInputMonitorState).as_ref() }) else {
+        return 0;
+    };
+    state.changed.store(true, Ordering::Release);
+    0
 }
 
 impl MicrophoneCapture {
@@ -415,5 +591,22 @@ mod tests {
             reader.stream_failure(),
             Some(StreamFailure::DeviceNotAvailable)
         );
+    }
+
+    #[test]
+    fn identifies_connected_input_devices_by_stable_identifier() {
+        let before = vec![InputDevice {
+            id: "built-in".to_owned(),
+            name: "MacBook Pro Microphone".to_owned(),
+        }];
+        let after = vec![
+            before[0].clone(),
+            InputDevice {
+                id: "earpods".to_owned(),
+                name: "EarPods Microphone".to_owned(),
+            },
+        ];
+
+        assert_eq!(device_names_not_in(&after, &before), ["EarPods Microphone"]);
     }
 }

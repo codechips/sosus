@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2026.9.10 — 2026-09-10
+
+
+### Added
+
+- Detect microphone device and default-input changes during recording, and show that the recording remains on its original source.
+
 ## 2026.9.8 — 2026-09-08
 
 

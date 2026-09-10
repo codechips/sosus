@@ -14,7 +14,10 @@ use time::OffsetDateTime;
 use super::{
     echo::EchoCanceller,
     health::{StreamEvents, StreamFailure},
-    mic::{MicrophoneCapture, MicrophoneCaptureError, MicrophoneReader},
+    mic::{
+        DefaultInputMonitor, MicrophoneCapture, MicrophoneCaptureError, MicrophoneChange,
+        MicrophoneReader,
+    },
     tap::{SystemAudioCapture, SystemAudioCaptureError, SystemAudioReader},
     wav::{RECORDING_SAMPLE_RATE, RecordingWavError, RecordingWavSink},
 };
@@ -54,6 +57,7 @@ pub struct RecordingSession {
     system_reader: SystemAudioReader,
     microphone_capture: MicrophoneCapture,
     microphone_reader: MicrophoneReader,
+    default_input_monitor: Option<DefaultInputMonitor>,
     sink: RecordingWavSink,
     system_converter: RateConverter,
     microphone_converter: RateConverter,
@@ -181,11 +185,23 @@ impl RecordingSession {
     ) -> Result<Self, RecordingError> {
         let system_converter = RateConverter::new(system_capture.sample_rate());
         let microphone_converter = RateConverter::new(microphone_capture.sample_rate());
+        let default_input_monitor = match DefaultInputMonitor::start() {
+            Ok(monitor) => Some(monitor),
+            Err(status) => {
+                tracing::warn!(
+                    event = "default_microphone_monitor_start_failed",
+                    error_category = "core_audio_add_listener",
+                    os_status = status
+                );
+                None
+            }
+        };
         Ok(Self {
             system_capture,
             system_reader,
             microphone_capture,
             microphone_reader,
+            default_input_monitor,
             sink,
             system_converter,
             microphone_converter,
@@ -218,6 +234,14 @@ impl RecordingSession {
 
     pub fn microphone_selection_notice(&self) -> Option<&str> {
         self.microphone_selection_notice.as_deref()
+    }
+
+    /// Return microphone hardware changes without changing this recording's
+    /// microphone stream.
+    pub(crate) fn take_microphone_change(&mut self) -> Option<MicrophoneChange> {
+        self.default_input_monitor
+            .as_mut()
+            .and_then(DefaultInputMonitor::take_change)
     }
 
     /// Drain queued callback data, mix it, and append it to the WAV.
