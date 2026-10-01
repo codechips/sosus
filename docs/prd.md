@@ -40,6 +40,7 @@ The archive is the source of truth. A meeting folder is collision-safe and priva
 ```
 <recordings>/<YYYY-MM-DD_HHMM[_N]>/
   recording.wav (or recording.m4a when optional archive compaction is enabled)
+  meeting.json          # optional user-visible title metadata
   transcript.md
   transcript.json        # only when JSON export is enabled
   .pipeline-state.json   # resumability metadata
@@ -65,7 +66,13 @@ The normal view has two columns: meetings and transcript. A compact lower record
 
 Dialogs are padded, centred, and keyboard-first. Language and model selection use filterable pickers. Progress reports current work only; completed steps and model-download byte counters do not occupy the interface.
 
-F2 exposes microphone on/off, system and microphone gain, language, diarization, engine, model, and JSON export. Config is TOML. Saves preserve comments and unrelated keys, are private and atomic, and refuse to overwrite a file changed while the dialog was open.
+The meeting pane shows each recording as a two-line item: its optional title,
+then its timestamp and duration. Press `n` to name or clear the selected
+recording without renaming its stable timestamp folder. F2 exposes microphone
+on/off, system and microphone gain, language, diarization, engine, model, and
+JSON export. Config is TOML. Saves preserve comments and unrelated keys, are
+private and atomic, and refuse to overwrite a file changed while the dialog was
+open.
 
 ## Privacy and reliability
 

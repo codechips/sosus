@@ -101,6 +101,7 @@ struct App {
     show_help: bool,
     settings: Option<modals::settings::SettingsModal>,
     picker: Option<PickerKind>,
+    title_editor: Option<TitleEdit>,
     settings_context: Option<SettingsContext>,
     confirm_quit_processing: bool,
     delete_confirmation: Option<Meeting>,
@@ -144,6 +145,7 @@ impl App {
             show_help: false,
             settings: None,
             picker: None,
+            title_editor: None,
             settings_context: startup.settings.map(|settings| SettingsContext {
                 config: settings.config,
                 config_path: settings.config_path,
@@ -260,7 +262,11 @@ impl App {
             }
             preview.stop();
         }
-        match AudioPreview::start(path, meeting.path.clone(), meeting.name.clone()) {
+        match AudioPreview::start(
+            path,
+            meeting.path.clone(),
+            meeting.display_name().to_owned(),
+        ) {
             Ok(preview) => self.preview = Some(preview),
             Err(error) => self.error = Some(error.to_string()),
         }
@@ -361,11 +367,24 @@ impl App {
     }
 
     fn meeting_row_at(&self, row: u16, terminal_height: u16) -> Option<usize> {
-        let recording_height = u16::from(self.recording.is_some()) * 4;
-        let pane_height = terminal_height.saturating_sub(2 + recording_height);
-        let index = row.checked_sub(2)? as usize;
-        (index < pane_height.saturating_sub(2) as usize && index < self.meetings.len())
-            .then_some(index)
+        let lower_height = if self.recording.is_some() {
+            4
+        } else if self.preview.is_some() {
+            1
+        } else {
+            0
+        };
+        let pane_height = terminal_height.saturating_sub(2 + lower_height);
+        let inner_height = pane_height.saturating_sub(2);
+        let content_row = row.checked_sub(2)?;
+        if content_row >= inner_height {
+            return None;
+        }
+        let capacity = usize::from(inner_height / 2);
+        let start =
+            panes::meetings::visible_start(self.meetings.len(), self.selected_meeting, capacity);
+        let index = start + usize::from(content_row / 2);
+        (index < self.meetings.len()).then_some(index)
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppAction> {
@@ -487,6 +506,19 @@ impl App {
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {}
                 _ => return None,
             }
+        }
+
+        if let Some(editor) = &mut self.title_editor {
+            match editor.modal.handle_key(key) {
+                modals::title::TitleAction::Cancel => self.title_editor = None,
+                modals::title::TitleAction::Save(title) => {
+                    let path = editor.meeting_path.clone();
+                    self.title_editor = None;
+                    return Some(AppAction::SaveMeetingTitle { path, title });
+                }
+                modals::title::TitleAction::None => {}
+            }
+            return None;
         }
 
         if let Some(picker) = &mut self.picker {
@@ -666,6 +698,16 @@ impl App {
                     return Some(AppAction::OpenMeetingFolder(meeting.path.clone()));
                 }
             }
+            (KeyCode::Char('n'), _) if !self.show_help => {
+                if let Some(meeting) = self.meetings.get(self.selected_meeting) {
+                    self.title_editor = Some(TitleEdit {
+                        meeting_path: meeting.path.clone(),
+                        modal: modals::title::TitleModal::new(
+                            meeting.title.as_deref().unwrap_or_default(),
+                        ),
+                    });
+                }
+            }
             (KeyCode::Char('d'), _) => {
                 self.delete_confirmation = self.meetings.get(self.selected_meeting).cloned();
             }
@@ -691,6 +733,7 @@ impl App {
             || self.show_help
             || self.settings.is_some()
             || self.picker.is_some()
+            || self.title_editor.is_some()
             || self.confirm_quit_processing
             || self.delete_confirmation.is_some()
             || self.retranscribe_confirmation.is_some()
@@ -1289,6 +1332,8 @@ impl App {
             );
         } else if self.show_help {
             render_help(frame, centered_rect(64, 68, area));
+        } else if let Some(editor) = &self.title_editor {
+            render_title_editor(frame, &editor.modal, centered_rect(70, 28, area));
         } else if let Some(picker) = &self.picker {
             let height = if matches!(&picker.kind, PickerType::Model) {
                 54
@@ -1308,7 +1353,7 @@ impl App {
             );
             render_retranscribe_confirmation(
                 frame,
-                &retranscription.meeting.name,
+                retranscription.meeting.display_name(),
                 &model,
                 &language_label(&retranscription.language),
                 centered_rect(58, 50, area),
@@ -1316,7 +1361,7 @@ impl App {
         } else if let Some(picker) = &self.retranscribe_speakers {
             render_retranscribe_speaker_picker(frame, picker, centered_rect(70, 50, area));
         } else if let Some(meeting) = &self.delete_confirmation {
-            render_delete_confirmation(frame, &meeting.name, centered_rect(54, 28, area));
+            render_delete_confirmation(frame, meeting.display_name(), centered_rect(54, 28, area));
         }
         render_status_bar(frame, area, self);
     }
@@ -1396,6 +1441,11 @@ enum PickerType {
 struct PickerKind {
     kind: PickerType,
     modal: modals::picker::PickerModal,
+}
+
+struct TitleEdit {
+    meeting_path: PathBuf,
+    modal: modals::title::TitleModal,
 }
 impl PickerKind {
     fn new(
@@ -1608,6 +1658,10 @@ enum AppAction {
         diarization: Option<RecordingDiarization>,
     },
     OpenMeetingFolder(PathBuf),
+    SaveMeetingTitle {
+        path: PathBuf,
+        title: String,
+    },
     TrashMeetingFolder(PathBuf),
     SaveSettings,
 }
@@ -1767,6 +1821,23 @@ async fn run_loop(terminal: &mut AppTerminal, startup: Startup) -> anyhow::Resul
                             Some(AppAction::OpenMeetingFolder(path)) => {
                                 if let Err(error) = open_meeting_folder(&path) {
                                     app.error = Some(format!("{error:#}"));
+                                }
+                            }
+                            Some(AppAction::SaveMeetingTitle { path, title }) => {
+                                match archive::save_manual_title(&path, &title) {
+                                    Ok(Some(_)) => {
+                                        app.refresh_archive_select(Some(&path));
+                                        app.message = Some("Recording name saved".to_owned());
+                                    }
+                                    Ok(None) => {
+                                        app.refresh_archive_select(Some(&path));
+                                        app.message = Some("Recording name cleared".to_owned());
+                                    }
+                                    Err(error) => {
+                                        app.error = Some(format!(
+                                            "Could not save recording name: {error}"
+                                        ));
+                                    }
                                 }
                             }
                             Some(AppAction::TrashMeetingFolder(path)) => {
@@ -2209,6 +2280,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("← / →            Skip 5s (Shift: 30s) while previewing"),
         Line::from("Enter             Play selected transcript segment"),
         Line::from("o                Open selected recording in Finder"),
+        Line::from("n                Name selected recording"),
         Line::from("d / D            Delete with confirmation / immediately"),
         Line::from("?                Toggle help"),
         Line::from("q                Stop recording and quit"),
@@ -2218,6 +2290,49 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Help")
+        .style(theme::overlay())
+        .padding(Padding::uniform(1));
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(content).block(block), area);
+}
+
+fn render_title_editor(frame: &mut Frame<'_>, editor: &modals::title::TitleModal, area: Rect) {
+    let capacity = usize::from(area.width.saturating_sub(8)).max(1);
+    let characters = editor.value().chars().collect::<Vec<_>>();
+    let cursor = editor.cursor().min(characters.len());
+    let start = cursor
+        .saturating_sub(capacity / 2)
+        .min(characters.len().saturating_sub(capacity));
+    let end = (start + capacity).min(characters.len());
+    let before = characters[start..cursor].iter().collect::<String>();
+    let cursor_character = characters.get(cursor).copied().unwrap_or(' ');
+    let after_start = (cursor + usize::from(cursor < characters.len())).min(end);
+    let after = characters[after_start..end].iter().collect::<String>();
+    let input = Line::from(vec![
+        Span::raw("> "),
+        Span::raw(before),
+        Span::styled(
+            cursor_character.to_string(),
+            theme::primary_text().add_modifier(Modifier::REVERSED),
+        ),
+        Span::raw(after),
+    ]);
+    let content = Text::from(vec![
+        Line::styled(
+            "The recording folder and files will keep their stable names.",
+            theme::secondary_text(),
+        ),
+        Line::from(""),
+        input,
+        Line::from(""),
+        Line::styled(
+            "Enter save · Ctrl+U clear · Esc cancel",
+            theme::secondary_text(),
+        ),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Name recording")
         .style(theme::overlay())
         .padding(Padding::uniform(1));
     frame.render_widget(Clear, area);
@@ -2918,6 +3033,7 @@ mod tests {
             Meeting {
                 path: PathBuf::from("/tmp/one"),
                 name: "one".to_owned(),
+                title: None,
                 duration_seconds: None,
                 transcript: vec![Segment {
                     start_s: 0.0,
@@ -2929,6 +3045,7 @@ mod tests {
             Meeting {
                 path: PathBuf::from("/tmp/two"),
                 name: "two".to_owned(),
+                title: None,
                 duration_seconds: None,
                 transcript: vec![Segment {
                     start_s: 0.0,
@@ -2945,7 +3062,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 5,
-                row: 3,
+                row: 4,
                 modifiers: KeyModifiers::NONE,
             },
             100,
@@ -3092,6 +3209,7 @@ mod tests {
         app.meetings = vec![Meeting {
             path: PathBuf::from("/tmp/meeting"),
             name: "meeting".to_owned(),
+            title: None,
             duration_seconds: None,
             transcript: Vec::new(),
         }];
@@ -3100,6 +3218,39 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
             Some(AppAction::OpenMeetingFolder(PathBuf::from("/tmp/meeting")))
         );
+    }
+
+    #[test]
+    fn name_key_edits_the_selected_recording_title() {
+        let mut app = app();
+        app.meetings = vec![Meeting {
+            path: PathBuf::from("/tmp/meeting"),
+            name: "2026-09-30_1432".to_owned(),
+            title: Some("Old title".to_owned()),
+            duration_seconds: None,
+            transcript: Vec::new(),
+        }];
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            app.title_editor.as_ref().map(|editor| editor.modal.value()),
+            Some("Old title")
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        for character in "Roadmap review".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(AppAction::SaveMeetingTitle {
+                path: PathBuf::from("/tmp/meeting"),
+                title: "Roadmap review".to_owned(),
+            })
+        );
+        assert!(app.title_editor.is_none());
     }
 
     #[test]
@@ -3122,6 +3273,7 @@ mod tests {
         app.meetings = vec![Meeting {
             path: PathBuf::from("/tmp/meeting"),
             name: "meeting".to_owned(),
+            title: None,
             duration_seconds: None,
             transcript: Vec::new(),
         }];
@@ -3156,6 +3308,7 @@ mod tests {
         app.meetings = vec![Meeting {
             path: PathBuf::from("/tmp/meeting"),
             name: "meeting".to_owned(),
+            title: None,
             duration_seconds: None,
             transcript: Vec::new(),
         }];
@@ -3200,6 +3353,7 @@ mod tests {
         app.meetings = vec![Meeting {
             path: root.clone(),
             name: "meeting".to_owned(),
+            title: None,
             duration_seconds: None,
             transcript: Vec::new(),
         }];
@@ -3285,6 +3439,7 @@ mod tests {
         app.meetings = vec![Meeting {
             path: root.clone(),
             name: "meeting".to_owned(),
+            title: None,
             duration_seconds: None,
             transcript: Vec::new(),
         }];
@@ -3311,6 +3466,7 @@ mod tests {
         let meeting = Meeting {
             path: PathBuf::from("/tmp/meeting"),
             name: "meeting".to_owned(),
+            title: None,
             duration_seconds: None,
             transcript: Vec::new(),
         };
@@ -3376,12 +3532,14 @@ mod tests {
             Meeting {
                 path: PathBuf::from("/tmp/one"),
                 name: "one".to_owned(),
+                title: None,
                 duration_seconds: None,
                 transcript: Vec::new(),
             },
             Meeting {
                 path: PathBuf::from("/tmp/two"),
                 name: "two".to_owned(),
+                title: None,
                 duration_seconds: None,
                 transcript: Vec::new(),
             },

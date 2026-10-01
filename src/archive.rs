@@ -1,9 +1,13 @@
 //! Filesystem-backed meeting archive.
 
 use std::{
-    fs, io,
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
+
+use serde::{Deserialize, Serialize};
 
 use symphonia::core::{
     formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
@@ -13,8 +17,32 @@ use symphonia::core::{
 pub struct Meeting {
     pub path: PathBuf,
     pub name: String,
+    pub title: Option<String>,
     pub duration_seconds: Option<f64>,
     pub transcript: Vec<Segment>,
+}
+
+impl Meeting {
+    pub fn display_name(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.name)
+    }
+}
+
+const METADATA_FILE: &str = "meeting.json";
+const METADATA_VERSION: u32 = 1;
+const MAX_TITLE_CHARS: usize = 120;
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct MeetingMetadata {
+    schema_version: u32,
+    title: Option<String>,
+    title_source: Option<TitleSource>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TitleSource {
+    Manual,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -44,14 +72,73 @@ fn load_meeting(path: PathBuf) -> io::Result<Meeting> {
         .to_owned();
     let recording =
         recording_path(&path).expect("recording existence was checked during discovery");
+    let title = load_metadata(&path).and_then(|metadata| normalize_title(metadata.title));
     Ok(Meeting {
         path,
         name,
+        title,
         duration_seconds: recording_duration_seconds(&recording),
         // Discovery drives the sidebar. Transcript parsing is deferred until this
         // meeting is selected, so a large archive does not block each refresh.
         transcript: Vec::new(),
     })
+}
+
+fn load_metadata(meeting_dir: &Path) -> Option<MeetingMetadata> {
+    let contents = fs::read(meeting_dir.join(METADATA_FILE)).ok()?;
+    let metadata: MeetingMetadata = serde_json::from_slice(&contents).ok()?;
+    (metadata.schema_version == METADATA_VERSION).then_some(metadata)
+}
+
+fn normalize_title(title: Option<String>) -> Option<String> {
+    let title = title?
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let title = title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_TITLE_CHARS)
+        .collect::<String>();
+    (!title.is_empty()).then_some(title)
+}
+
+pub fn save_manual_title(meeting_dir: &Path, title: &str) -> io::Result<Option<String>> {
+    let title = normalize_title(Some(title.to_owned()));
+    let metadata = MeetingMetadata {
+        schema_version: METADATA_VERSION,
+        title: title.clone(),
+        title_source: title.as_ref().map(|_| TitleSource::Manual),
+    };
+    let destination = meeting_dir.join(METADATA_FILE);
+    let temporary = meeting_dir.join(format!(
+        ".{METADATA_FILE}.{}.{}.partial",
+        std::process::id(),
+        time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+    ));
+    let bytes = serde_json::to_vec_pretty(&metadata).map_err(io::Error::other)?;
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, destination)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result.map(|()| title)
 }
 
 pub fn load_transcript(meeting: &Meeting) -> io::Result<Vec<Segment>> {
@@ -162,7 +249,7 @@ fn parse_timestamp(value: &str) -> io::Result<f64> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs};
+    use std::{env, fs, os::unix::fs::PermissionsExt};
 
     use super::*;
 
@@ -194,6 +281,75 @@ mod tests {
 
         assert_eq!(meetings.len(), 1);
         assert_eq!(meetings[0].name, "complete");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persists_and_discovers_a_manual_title_without_renaming_the_folder() {
+        let root = env::temp_dir().join(format!(
+            "sosus-archive-title-test-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let meeting = root.join("2026-09-30_1432");
+        fs::create_dir_all(&meeting).unwrap();
+        hound::WavWriter::create(
+            meeting.join("recording.wav"),
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap()
+        .finalize()
+        .unwrap();
+
+        let saved = save_manual_title(&meeting, "  Product   roadmap discussion  ").unwrap();
+        let meetings = discover(&root).unwrap();
+
+        assert_eq!(saved.as_deref(), Some("Product roadmap discussion"));
+        assert_eq!(meetings[0].name, "2026-09-30_1432");
+        assert_eq!(
+            meetings[0].title.as_deref(),
+            Some("Product roadmap discussion")
+        );
+        assert_eq!(
+            fs::metadata(meeting.join(METADATA_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_or_empty_title_metadata_degrades_to_no_title() {
+        let root = env::temp_dir().join(format!(
+            "sosus-archive-bad-title-test-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let meeting = root.join("meeting");
+        fs::create_dir_all(&meeting).unwrap();
+        fs::write(meeting.join("recording.m4a"), b"placeholder").unwrap();
+        fs::write(meeting.join(METADATA_FILE), b"not json").unwrap();
+
+        assert_eq!(discover(&root).unwrap()[0].title, None);
+        save_manual_title(&meeting, "   ").unwrap();
+        assert_eq!(discover(&root).unwrap()[0].title, None);
+        fs::write(
+            meeting.join(METADATA_FILE),
+            br#"{"schema_version":1,"title":"Notes\u001b[31m\nreview"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            discover(&root).unwrap()[0].title.as_deref(),
+            Some("Notes [31m review")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -2,3 +2,4 @@
 
 pub(crate) mod picker;
 pub(crate) mod settings;
+pub(crate) mod title;
