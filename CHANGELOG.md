@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 2026.10.1 — 2026-10-01
+
+
 ### Added
 
 - Name recordings without changing their archive folders, and show titles with recording details in a two-line archive list.
